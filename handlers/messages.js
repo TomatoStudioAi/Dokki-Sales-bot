@@ -1,36 +1,44 @@
-import { Telegraf } from 'telegraf';
-import { config } from './config/env.js';
-import { handleClientMessage } from './handlers/messages.js';
-import { handleAdminReply } from './handlers/admin.js';
+import { db } from '../services/supabase.js';
+import { getAIResponse } from '../services/llm.js';
+import { config } from '../config/env.js';
 
-const bot = new Telegraf(config.telegram.token);
-
-bot.on('message', async (ctx) => {
+export const handleClientMessage = async (ctx) => {
   try {
-    // Если сообщение пришло из нашей админ-группы
-    if (ctx.chat.id === config.telegram.adminGroupId) {
-      return await handleAdminReply(ctx);
+    const userId = ctx.from.id;
+    const text = ctx.message.text;
+    if (!text) return;
+
+    let topic = await db.getTopic(userId);
+
+    if (!topic) {
+      const forum = await ctx.telegram.createForumTopic(
+        config.telegram.adminGroupId,
+        `${ctx.from.first_name} (@${ctx.from.username || 'n/a'})`
+      );
+      topic = await db.saveTopic(userId, forum.message_thread_id, ctx.from.username || 'n/a');
     }
-    // Если сообщение пришло в ЛС боту
-    if (ctx.chat.type === 'private') {
-      return await handleClientMessage(ctx);
-    }
+
+    await ctx.telegram.sendMessage(config.telegram.adminGroupId, `👤 Клиент: ${text}`, { 
+      message_thread_id: topic.topic_id 
+    });
+
+    if (topic.admin_override) return;
+
+    const history = await db.getHistory(userId);
+    const ai = await getAIResponse(userId, text, history);
+
+    await ctx.reply(ai.text);
+    
+    await ctx.telegram.sendMessage(config.telegram.adminGroupId, `🤖 Алексей (${ai.model}): ${ai.text}`, { 
+      message_thread_id: topic.topic_id 
+    });
+
+    await db.logMessage({
+      user_id: userId, message_text: text, bot_response: ai.text, model_used: ai.model, from_user: true
+    });
+
   } catch (err) {
-    console.error('🔥 Global Error:', err.message);
+    console.error('❌ Ошибка в сообщениях:', err.message);
+    await ctx.reply("Извините, произошла техническая ошибка. Я уже передал информацию менеджеру.");
   }
-});
-
-bot.launch().then(() => {
-  console.log('🚀 TomatoStudio AI "Алексей" запущен. Полная интеграция с БД.');
-});
-
-// ✅ ФИКС 409 Conflict: Грациозное завершение процесса
-// При обновлении на Railway бот корректно отключается от Telegram, не оставляя "призраков"
-process.once('SIGINT', () => {
-  console.log('🛑 Получен сигнал SIGINT. Останавливаем сессию...');
-  bot.stop('SIGINT');
-});
-process.once('SIGTERM', () => {
-  console.log('🛑 Получен сигнал SIGTERM. Останавливаем сессию...');
-  bot.stop('SIGTERM');
-});
+};

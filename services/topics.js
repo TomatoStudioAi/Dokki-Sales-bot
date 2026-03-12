@@ -2,22 +2,22 @@ import { config } from '../config/env.js';
 
 export const topics = {
     /**
-     * Создать новый топик в группе
+     * Создает новый топик в админ-группе для клиента
      */
     async create(ctx, firstName, username) {
         try {
-            const title = `${firstName}${username ? ` (@${username})` : ''}`;
-            const chat = await ctx.telegram.createForumTopic(
+            const title = username ? `${firstName} (@${username})` : firstName;
+            
+            // Создаем топик. adminGroupId уже преобразован в Number в конфиге
+            const forum = await ctx.telegram.createForumTopic(
                 config.telegram.adminGroupId,
                 title
             );
             
-            console.log(`📝 Создан новый топик: ${title} (ID: ${chat.message_thread_id})`);
-            return chat.message_thread_id;
+            return forum.message_thread_id;
         } catch (error) {
-            console.error('❌ Ошибка создания топика:', error.message);
-            // Если форум не включен в группе, это выдаст ошибку
-            throw new Error('Убедитесь, что в группе включены "Темы" (Topics)');
+            console.error('❌ Ошибка при создании топика в Telegram:', error.message);
+            throw error;
         }
     }
 };

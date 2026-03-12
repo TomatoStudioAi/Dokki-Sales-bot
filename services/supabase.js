@@ -4,6 +4,9 @@ import { config } from '../config/env.js';
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
 export const db = {
+  // Экспортируем сам клиент для прямых запросов в index.js
+  supabase,
+
   getTopic: async (userId) => {
     const { data, error } = await supabase
       .from('user_topics')
@@ -11,14 +14,21 @@ export const db = {
       .eq('user_id', userId)
       .single();
 
-    if (error && error.code !== 'PGRST116') { // PGRST116 = "запись не найдена"
+    if (error && error.code !== 'PGRST116') {
       throw new Error(`Ошибка БД при поиске топика: ${error.message}`);
     }
     return data || null;
   },
 
-  saveTopic: async (userId, topicId, username) => {
-    const record = { user_id: userId, topic_id: topicId, username, admin_override: false };
+  // Изменено название и аргументы под вызов в index.js
+  createTopic: async (topicData) => {
+    const record = { 
+      user_id: topicData.user_id, 
+      topic_id: topicData.topic_id, 
+      username: topicData.username || 'n/a',
+      first_name: topicData.first_name || 'Клиент',
+      admin_override: false 
+    };
     const { error } = await supabase.from('user_topics').upsert(record);
     
     if (error) throw new Error(`Ошибка БД при сохранении топика: ${error.message}`);
@@ -39,18 +49,23 @@ export const db = {
     await supabase.from('messages_log').insert(log).catch(e => console.error('Ошибка логирования:', e.message));
   },
 
+  // Исправлено формирование истории из парных записей
   getHistory: async (userId) => {
     const { data, error } = await supabase
       .from('messages_log')
-      .select('from_user, message_text')
+      .select('message_text, bot_response')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
-      .limit(10);
+      .limit(5);
 
     if (error || !data) return [];
-    return data.reverse().map(l => ({
-      role: l.from_user ? 'user' : 'assistant',
-      content: l.message_text
-    }));
+    
+    const history = [];
+    data.reverse().forEach(row => {
+      if (row.message_text) history.push({ role: 'user', content: row.message_text });
+      if (row.bot_response) history.push({ role: 'assistant', content: row.bot_response });
+    });
+
+    return history;
   }
 };

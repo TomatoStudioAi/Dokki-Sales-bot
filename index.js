@@ -1,12 +1,15 @@
 import { Telegraf } from 'telegraf';
+import fs from 'fs';
+import https from 'https';
 import { config } from './config/env.js';
 import { db } from './services/supabase.js';
 import { llm } from './services/llm.js';
 import { topics } from './services/topics.js';
+import { handleAdminReply } from './handlers/admin.js';
 
 const bot = new Telegraf(config.telegram.token);
 
-// Системный промпт (Манифест Алексея)
+// Манифест Алексея (2026 Edition)
 const SYSTEM_PROMPT = `
 You are Alexey, Senior Manager at I.T.C Solutions FZE (TomatoStudio).
 Your style: professional, concise, expert. 
@@ -15,7 +18,25 @@ If client asks for pricing -> suggest a meeting.
 Goal: Qualify the lead and close for a call.
 `;
 
-// Помощник для определения языка
+/**
+ * Вспомогательная функция для скачивания файлов
+ */
+async function downloadVoice(fileLink, filePath) {
+    return new Promise((resolve, reject) => {
+        const file = fs.createWriteStream(filePath);
+        https.get(fileLink, (response) => {
+            response.pipe(file);
+            file.on('finish', () => {
+                file.close();
+                resolve();
+            });
+        }).on('error', (err) => {
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            reject(err);
+        });
+    });
+}
+
 function detectLanguage(text) {
     if (/[а-яА-ЯёЁ]/.test(text)) return 'ru';
     if (/[\u0600-\u06FF]/.test(text)) return 'ar';
@@ -23,62 +44,73 @@ function detectLanguage(text) {
 }
 
 /**
- * ОБРАБОТКА СООБЩЕНИЙ ОТ КЛИЕНТОВ
+ * 1. ОБРАБОТКА ВХОДЯЩИХ ЧЕРЕЗ TELEGRAM BUSINESS (Личный аккаунт)
  */
-bot.on('message', async (ctx) => {
-    // Игнорируем сообщения в админ-группе (они обрабатываются отдельно)
-    if (ctx.chat.id.toString() === config.telegram.adminGroupId.toString()) {
-        return handleAdminReply(ctx);
-    }
-
-    const userId = ctx.from.id;
-    const text = ctx.message.text || "[Медиа-сообщение]";
-    const lang = detectLanguage(text);
+bot.on('business_message', async (ctx) => {
+    const msg = ctx.businessMessage;
+    const userId = msg.from.id;
+    const connectionId = ctx.businessConnectionId;
+    
+    let text = msg.text || msg.caption || '';
+    const isVoice = !!msg.voice;
 
     try {
-        // 1. Ищем или создаем топик в БД
+        // Если пришел голос — расшифровываем
+        if (isVoice) {
+            await ctx.sendChatAction('typing');
+            const fileLink = await ctx.telegram.getFileLink(msg.voice.file_id);
+            const filePath = `./voice_${msg.voice.file_id}.oga`;
+            
+            await downloadVoice(fileLink, filePath);
+            text = await llm.transcribe(filePath);
+            
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        }
+
+        if (!text && !isVoice) return; // Игнорируем пустые медиа без текста
+        const lang = detectLanguage(text);
+
+        // Поиск/Создание топика
         let userTopic = await db.getTopic(userId);
-        
         if (!userTopic) {
-            const topicId = await topics.create(ctx, ctx.from.first_name, ctx.from.username);
+            const topicId = await topics.create(ctx, msg.from.first_name, msg.from.username);
             userTopic = await db.createTopic({
                 user_id: userId,
                 topic_id: topicId,
-                username: ctx.from.username,
-                first_name: ctx.from.first_name
+                username: msg.from.username || 'n/a',
+                first_name: msg.from.first_name
             });
-            console.log(`✅ Новый клиент: ${ctx.from.first_name} (ID: ${userId})`);
         }
 
-        // 2. Пересылаем сообщение клиента в админ-группу (в нужный топик)
-        await ctx.telegram.sendMessage(config.telegram.adminGroupId, `<b>Клиент:</b> ${text}`, {
+        // Пересылаем в админ-группу
+        const label = isVoice ? '🎤 <b>[Голос] Клиент:</b>' : '<b>Клиент:</b>';
+        await ctx.telegram.sendMessage(config.telegram.adminGroupId, `${label} ${text}`, {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'
         });
 
-        // 3. Если админ перехватил диалог (override), бот молчит
+        // Если включен ручной режим — бот не отвечает
         if (userTopic.admin_override) return;
 
-        // 4. Получаем историю и выбираем модель
+        // Работа ИИ
         const history = await db.getHistory(userId);
         const model = llm.selectModel(text, history.length / 2, history);
 
-        // Имитация печатания
         await ctx.sendChatAction('typing');
-
-        // 5. Запрос к ИИ
         const aiResponse = await llm.ask(model, SYSTEM_PROMPT, history, text);
 
-        // 6. Отвечаем клиенту
-        await ctx.reply(aiResponse.text);
+        // Ответ клиенту через бизнес-канал
+        await ctx.telegram.sendMessage(msg.chat.id, aiResponse.text, {
+            business_connection_id: connectionId
+        });
 
-        // 7. Дублируем ответ бота в админ-топик
-        await ctx.telegram.sendMessage(config.telegram.adminGroupId, `<b>Алексей (ИИ):</b> ${aiResponse.text}`, {
+        // Дубликат ответа ИИ в группу
+        await ctx.telegram.sendMessage(config.telegram.adminGroupId, `🤖 <b>Алексей (ИИ):</b> ${aiResponse.text}`, {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'
         });
 
-        // 8. Логируем в Supabase
+        // Лог в базу
         await db.logMessage({
             user_id: userId,
             message_text: text,
@@ -90,44 +122,26 @@ bot.on('message', async (ctx) => {
             language: lang
         });
 
-        console.log(`🤖 Ответ (${aiResponse.model}): $${aiResponse.cost}`);
-
     } catch (error) {
-        console.error('❌ Ошибка в обработчике клиента:', error);
+        console.error('❌ Ошибка Business Message:', error);
     }
 });
 
 /**
- * ОБРАБОТКА ОТВЕТОВ ИЗ АДМИН-ГРУППЫ
+ * 2. ОБРАБОТКА ОТВЕТОВ ИЗ АДМИН-ГРУППЫ
  */
-async function handleAdminReply(ctx) {
-    const topicId = ctx.message.message_thread_id;
-    if (!topicId) return; // Игнорируем General чат
-
-    try {
-        // Находим клиента по topic_id
-        const { data: userTopic, error } = await db.supabase
-            .from('user_topics')
-            .select('*')
-            .eq('topic_id', topicId)
-            .single();
-
-        if (userTopic) {
-            // Пересылаем ответ админа клиенту
-            await ctx.telegram.sendMessage(userTopic.user_id, ctx.message.text);
-            
-            // Включаем режим перехвата (бот перестает отвечать сам)
-            await db.setOverride(userTopic.user_id, true);
-            console.log(`💬 Админ взял управление в топике #${topicId}`);
-        }
-    } catch (e) {
-        console.error('❌ Ошибка реплая админа:', e);
+bot.on('message', async (ctx) => {
+    // Если сообщение из админ-группы — передаем в хендлер
+    if (ctx.chat.id.toString() === config.telegram.adminGroupId.toString()) {
+        await handleAdminReply(ctx);
     }
-}
+});
 
 // Запуск
-bot.launch().then(() => console.log('🚀 Бот "Алексей" запущен и готов к работе!'));
+bot.launch().then(() => {
+    console.log('🚀 Бот "Алексей" успешно запущен!');
+    console.log('📡 Режим: Telegram Business + Supergroup Topics');
+});
 
-// Остановка
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
