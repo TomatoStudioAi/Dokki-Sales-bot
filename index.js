@@ -21,6 +21,9 @@ const server = app.listen(PORT, () => {
 const bot = new Telegraf(config.telegram.token);
 
 bot.on(['message', 'voice'], async (ctx) => {
+    const text = ctx.message?.text || 'Голосовое сообщение или медиа';
+    console.log(`📥 Получено сообщение от ${ctx.from.id}:`, text); // Маячок
+
     const chatId = Number(ctx.chat.id);
     const adminGroupId = Number(config.telegram.adminGroupId);
 
@@ -29,7 +32,6 @@ bot.on(['message', 'voice'], async (ctx) => {
     }
 
     const userId = ctx.from.id;
-    const text = ctx.message.text || 'Голосовое сообщение или медиа';
 
     try {
         let userTopic = await db.getTopic(userId);
@@ -65,7 +67,7 @@ bot.on(['message', 'voice'], async (ctx) => {
     }
 });
 
-// 3. Graceful Shutdown (закрываем и сервер, и бота)
+// 3. Graceful Shutdown
 const shutdown = () => {
     console.log('⚠️ Stopping server and bot...');
     server.close();
@@ -75,7 +77,7 @@ const shutdown = () => {
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
 
-// 4. Запуск с задержкой 5 секунд
+// 4. Запуск 
 const startBot = async () => {
     try {
         console.log('🔧 Deleting webhook...');
@@ -86,7 +88,8 @@ const startBot = async () => {
         await new Promise(resolve => setTimeout(resolve, 5000));
         console.log('✅ Wait complete');
 
-        await bot.launch({ dropPendingUpdates: true });
+        // УБРАЛИ dropPendingUpdates: true, чтобы предотвратить зависание
+        await bot.launch(); 
         console.log('✅ Бот запущен (polling mode)');
     } catch (err) {
         console.error('❌ Launch failed:', err.message);
