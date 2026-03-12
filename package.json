@@ -1,0 +1,14 @@
+{
+  "name": "tomatostudio-ai-assistant",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index-fixed.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "@supabase/supabase-js": "^2.39.7",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^3.3.2"
+  }
+}
