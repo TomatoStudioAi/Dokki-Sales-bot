@@ -20,7 +20,7 @@ const server = app.listen(PORT, () => {
 // 2. Инициализация бота
 const bot = new Telegraf(config.telegram.token);
 
-// ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК ОШИБОК (Выведет 409 Conflict и другие скрытые краши)
+// ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК ОШИБОК
 bot.catch((err, ctx) => {
     console.error(`🚨 Глобальная ошибка Telegraf (update ${ctx?.update?.update_id || 'unknown'}):`, err);
 });
@@ -72,7 +72,7 @@ bot.on(['message', 'voice'], async (ctx) => {
     }
 });
 
-// 3. Graceful Shutdown
+// 3. Graceful Shutdown с таймером-предохранителем
 let isShuttingDown = false;
 
 const shutdown = async (signal) => {
@@ -81,19 +81,34 @@ const shutdown = async (signal) => {
     
     console.log(`⚠️ Received ${signal}, shutting down gracefully...`);
     
+    // КРИТИЧНО: Таймаут-предохранитель (3 секунды)
+    const forceExitTimer = setTimeout(() => {
+        console.error('❌ Graceful shutdown timeout! Force exiting...');
+        process.exit(1);
+    }, 3000);
+    
     try {
-        await bot.stop(signal);
-        console.log('✅ Bot stopped');
-        
-        if (server) {
-            await new Promise((resolve) => server.close(resolve));
-            console.log('✅ HTTP server closed');
+        if (bot) {
+            await bot.stop(signal);
+            console.log('✅ Bot stopped');
         }
         
+        if (server) {
+            await new Promise((resolve) => {
+                server.close(() => {
+                    console.log('✅ HTTP server closed');
+                    resolve();
+                });
+            });
+        }
+        
+        clearTimeout(forceExitTimer);
         console.log('✅ Graceful shutdown complete');
         process.exit(0);
+        
     } catch (err) {
         console.error('❌ Shutdown error:', err);
+        clearTimeout(forceExitTimer);
         process.exit(1);
     }
 };
