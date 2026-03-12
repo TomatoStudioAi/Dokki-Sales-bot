@@ -1,3 +1,4 @@
+import express from 'express';
 import { Telegraf } from 'telegraf';
 import { config } from './config/env.js';
 import { db } from './services/supabase.js';
@@ -5,6 +6,18 @@ import { llm } from './services/llm.js';
 import { topics } from './services/topics.js';
 import { handleAdminReply } from './handlers/admin.js';
 
+// 1. HTTP-сервер для Railway Healthcheck
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => res.send('Bot is running'));
+app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+
+const server = app.listen(PORT, () => {
+    console.log(`✅ HTTP server listening on port ${PORT}`);
+});
+
+// 2. Инициализация бота
 const bot = new Telegraf(config.telegram.token);
 
 bot.on(['message', 'voice'], async (ctx) => {
@@ -52,15 +65,17 @@ bot.on(['message', 'voice'], async (ctx) => {
     }
 });
 
+// 3. Graceful Shutdown (закрываем и сервер, и бота)
 const shutdown = () => {
-    console.log('⚠️ Stopping bot...');
+    console.log('⚠️ Stopping server and bot...');
+    server.close();
     bot.stop();
     process.exit(0);
 };
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
 
-// Обернули запуск в асинхронную функцию для корректной работы await
+// 4. Запуск с задержкой 5 секунд
 const startBot = async () => {
     try {
         console.log('🔧 Deleting webhook...');
