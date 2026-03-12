@@ -7,16 +7,10 @@ import { handleAdminReply } from './handlers/admin.js';
 
 const bot = new Telegraf(config.telegram.token);
 
-// Принудительный сброс вебхука перед стартом
-console.log('🔧 Deleting webhook...');
-await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-console.log('✅ Webhook deleted');
-
 bot.on(['message', 'voice'], async (ctx) => {
     const chatId = Number(ctx.chat.id);
     const adminGroupId = Number(config.telegram.adminGroupId);
 
-    // Логика ответов админа в топиках
     if (chatId === adminGroupId) {
         return await handleAdminReply(ctx);
     }
@@ -25,7 +19,6 @@ bot.on(['message', 'voice'], async (ctx) => {
     const text = ctx.message.text || 'Голосовое сообщение или медиа';
 
     try {
-        // 1. Работа с топиком в БД и Telegram
         let userTopic = await db.getTopic(userId);
         
         if (!userTopic) {
@@ -39,19 +32,15 @@ bot.on(['message', 'voice'], async (ctx) => {
             });
         }
 
-        // 2. Проброс сообщения в админ-группу
         await ctx.telegram.sendMessage(adminGroupId, `<b>Клиент:</b> ${text}`, {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'
         });
 
-        // 3. Если админ "перехватил" диалог, ИИ молчит
         if (userTopic.admin_override) return;
 
-        // 4. Запрос к ИИ и обработка ответа (FIX undefined)
         const aiResponse = await llm.ask('gpt-4o', 'You are Alexey...', [], text);
         
-        // Проверяем, что пришло: строка или объект
         const replyText = typeof aiResponse === 'string' 
             ? aiResponse 
             : (aiResponse.text || aiResponse.response || 'Ошибка: ИИ вернул пустой ответ');
@@ -60,11 +49,9 @@ bot.on(['message', 'voice'], async (ctx) => {
 
     } catch (e) { 
         console.error('❌ Ошибка в обработчике:', e.message);
-        // Если база всё еще кэширует старую схему, мы увидим это здесь
     }
 });
 
-// Корректное завершение работы
 const shutdown = () => {
     console.log('⚠️ Stopping bot...');
     bot.stop();
@@ -73,10 +60,23 @@ const shutdown = () => {
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
 
-// Запуск
-bot.launch({ dropPendingUpdates: true })
-    .then(() => console.log('✅ Бот запущен и готов к работе'))
-    .catch(err => {
-        console.error('❌ Ошибка запуска:', err);
+// Обернули запуск в асинхронную функцию для корректной работы await
+const startBot = async () => {
+    try {
+        console.log('🔧 Deleting webhook...');
+        await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+        console.log('✅ Webhook deleted');
+
+        console.log('⏳ Waiting 5 seconds for Telegram to release connection...');
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        console.log('✅ Wait complete');
+
+        await bot.launch({ dropPendingUpdates: true });
+        console.log('✅ Бот запущен (polling mode)');
+    } catch (err) {
+        console.error('❌ Launch failed:', err.message);
         process.exit(1);
-    });
+    }
+};
+
+startBot();
