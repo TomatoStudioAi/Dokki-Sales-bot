@@ -20,6 +20,11 @@ const server = app.listen(PORT, () => {
 // 2. Инициализация бота
 const bot = new Telegraf(config.telegram.token);
 
+// ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК ОШИБОК (Выведет 409 Conflict и другие скрытые краши)
+bot.catch((err, ctx) => {
+    console.error(`🚨 Глобальная ошибка Telegraf (update ${ctx?.update?.update_id || 'unknown'}):`, err);
+});
+
 bot.on(['message', 'voice'], async (ctx) => {
     const text = ctx.message?.text || 'Голосовое сообщение или медиа';
     console.log(`📥 Получено сообщение от ${ctx.from.id}:`, text);
