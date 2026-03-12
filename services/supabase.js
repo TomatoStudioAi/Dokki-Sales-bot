@@ -4,62 +4,53 @@ import { config } from '../config/env.js';
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
 export const db = {
-  // Получить данные топика пользователя
-  async getTopic(userId) {
+  getTopic: async (userId) => {
     const { data, error } = await supabase
       .from('user_topics')
       .select('*')
       .eq('user_id', userId)
       .single();
-    
-    if (error && error.code !== 'PGRST116') throw error;
-    return data;
+
+    if (error && error.code !== 'PGRST116') { // PGRST116 = "запись не найдена"
+      throw new Error(`Ошибка БД при поиске топика: ${error.message}`);
+    }
+    return data || null;
   },
 
-  // Создать новый топик
-  async createTopic(userData) {
-    const { data, error } = await supabase
-      .from('user_topics')
-      .insert([userData])
-      .select()
-      .single();
+  saveTopic: async (userId, topicId, username) => {
+    const record = { user_id: userId, topic_id: topicId, username, admin_override: false };
+    const { error } = await supabase.from('user_topics').upsert(record);
     
-    if (error) throw error;
-    return data;
+    if (error) throw new Error(`Ошибка БД при сохранении топика: ${error.message}`);
+    return record;
   },
 
-  // Обновить статус вмешательства админа
-  async setOverride(userId, status) {
-    const { error } = await supabase
-      .from('user_topics')
-      .update({ admin_override: status, last_activity: new Date() })
-      .eq('user_id', userId);
-    
-    if (error) throw error;
+  setOverride: async (userId, value) => {
+    await supabase.from('user_topics').update({ admin_override: value }).eq('user_id', userId);
   },
 
-  // Логирование сообщения и стоимости
-  async logMessage(logData) {
-    const { error } = await supabase
-      .from('messages_log')
-      .insert([logData]);
-    
-    if (error) console.error('⚠️ Ошибка записи лога:', error.message);
+  getUserIdByTopic: async (topicId) => {
+    const { data, error } = await supabase.from('user_topics').select('user_id').eq('topic_id', topicId).single();
+    if (error) return null;
+    return data.user_id;
   },
 
-  // Получение истории для контекста ИИ
-  async getHistory(userId, limit = 5) {
+  logMessage: async (log) => {
+    await supabase.from('messages_log').insert(log).catch(e => console.error('Ошибка логирования:', e.message));
+  },
+
+  getHistory: async (userId) => {
     const { data, error } = await supabase
       .from('messages_log')
-      .select('message_text, bot_response')
+      .select('from_user, message_text')
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
-      .limit(limit);
-    
-    if (error) return [];
-    return data.reverse().flatMap(m => [
-      { role: 'user', content: m.message_text },
-      { role: 'assistant', content: m.bot_response }
-    ]);
+      .limit(10);
+
+    if (error || !data) return [];
+    return data.reverse().map(l => ({
+      role: l.from_user ? 'user' : 'assistant',
+      content: l.message_text
+    }));
   }
 };
