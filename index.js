@@ -22,7 +22,7 @@ const bot = new Telegraf(config.telegram.token);
 
 bot.on(['message', 'voice'], async (ctx) => {
     const text = ctx.message?.text || 'Голосовое сообщение или медиа';
-    console.log(`📥 Получено сообщение от ${ctx.from.id}:`, text); // Маячок
+    console.log(`📥 Получено сообщение от ${ctx.from.id}:`, text);
 
     const chatId = Number(ctx.chat.id);
     const adminGroupId = Number(config.telegram.adminGroupId);
@@ -68,14 +68,33 @@ bot.on(['message', 'voice'], async (ctx) => {
 });
 
 // 3. Graceful Shutdown
-const shutdown = () => {
-    console.log('⚠️ Stopping server and bot...');
-    server.close();
-    bot.stop();
-    process.exit(0);
+let isShuttingDown = false;
+
+const shutdown = async (signal) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    
+    console.log(`⚠️ Received ${signal}, shutting down gracefully...`);
+    
+    try {
+        await bot.stop(signal);
+        console.log('✅ Bot stopped');
+        
+        if (server) {
+            await new Promise((resolve) => server.close(resolve));
+            console.log('✅ HTTP server closed');
+        }
+        
+        console.log('✅ Graceful shutdown complete');
+        process.exit(0);
+    } catch (err) {
+        console.error('❌ Shutdown error:', err);
+        process.exit(1);
+    }
 };
-process.once('SIGINT', shutdown);
-process.once('SIGTERM', shutdown);
+
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
 
 // 4. Запуск 
 const startBot = async () => {
@@ -88,7 +107,6 @@ const startBot = async () => {
         await new Promise(resolve => setTimeout(resolve, 5000));
         console.log('✅ Wait complete');
 
-        // УБРАЛИ dropPendingUpdates: true, чтобы предотвратить зависание
         await bot.launch(); 
         console.log('✅ Бот запущен (polling mode)');
     } catch (err) {
