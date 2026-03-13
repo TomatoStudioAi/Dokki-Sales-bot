@@ -168,7 +168,7 @@ const startBot = async () => {
         await bot.telegram.deleteWebhook({ drop_pending_updates: true });
         
         console.log(`[PID:${PID}] ⏳ Жду 2 секунды...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 7000));
         
         await bot.launch();
         console.log(`[PID:${PID}] ✅ Бот запущен`);
