@@ -27,8 +27,8 @@ export const config = {
     deepseekKey: process.env.DEEPSEEK_API_KEY,
     models: {
       filter: process.env.LLM_MODEL_FILTER || 'gpt-4o-mini',
-      expert: process.env.LLM_MODEL_EXPERT || 'deepseek-chat',
-      closer: process.env.LLM_MODEL_CLOSER || 'claude-3-5-sonnet-20241022',
+      expert: process.env.LLM_MODEL_EXPERT || 'gemini-3-flash-preview',
+      closer: process.env.LLM_MODEL_CLOSER || 'claude-sonnet-4-6'
     },
     temperature: parseFloat(process.env.LLM_TEMPERATURE) || 0.1,
     maxTokens: parseInt(process.env.LLM_MAX_TOKENS) || 1000,

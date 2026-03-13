@@ -1,20 +1,15 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import { config } from '../config/env.js';
 import { calculateCost } from './cost-tracker.js';
 
 const openai = new OpenAI({ apiKey: config.ai.openaiKey });
-const deepseek = new OpenAI({ 
-    apiKey: config.ai.deepseekKey, 
-    baseURL: 'https://api.deepseek.com/v1' 
-});
 const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
+const googleAi = new GoogleGenAI(config.ai.googleApiKey);
 
 export const llm = {
-    /**
-     * Превращает голос в текст через Whisper
-     */
     async transcribe(filePath) {
         try {
             const transcription = await openai.audio.transcriptions.create({
@@ -45,20 +40,17 @@ export const llm = {
     selectModel(text, messageCount, history) {
         const input = text.toLowerCase();
         
-        // Премиум: финальные переговоры (договор, встреча, созвон)
         if (input.includes('договор') || input.includes('созвон') || input.includes('встреча') || input.includes('подписать')) {
-            return config.ai.models.closer; // claude
+            return config.ai.models.closer; 
         }
         
-        // Средняя: конкретный интерес (бюджет, кейсы, процесс, цены) или долгий диалог
         if (input.includes('бюджет') || input.includes('цена') || input.includes('стоимость') || 
             input.includes('кейс') || input.includes('процесс') || input.includes('как вы') || 
             messageCount >= 4) {
-            return config.ai.models.expert; // deepseek
+            return config.ai.models.expert; 
         }
         
-        // Дешёвая: всё остальное
-        return config.ai.models.filter; // gpt-4o-mini
+        return config.ai.models.filter; 
     },
 
     async ask(model, systemPrompt, history, userMessage) {
@@ -69,7 +61,28 @@ export const llm = {
         let usage = { input_tokens: 0, output_tokens: 0 };
 
         try {
-            if (model.includes('claude')) {
+            // Ветка Google Gemini
+            if (model.startsWith('gemini-')) {
+                const modelInstance = googleAi.getGenerativeModel({ 
+                    model: model,
+                    systemInstruction: systemPrompt 
+                });
+
+                const result = await modelInstance.generateContent({
+                    contents: cleanMessages.map(m => ({
+                        role: m.role === 'assistant' ? 'model' : 'user',
+                        parts: [{ text: m.content }]
+                    }))
+                });
+
+                responseText = result.response.text();
+                // Gemini API в текущем SDK возвращает токены через отдельный вызов или metadata
+                usage = { 
+                    input_tokens: result.response.usageMetadata?.promptTokenCount || 0, 
+                    output_tokens: result.response.usageMetadata?.candidatesTokenCount || 0 
+                };
+
+            } else if (model.includes('claude')) {
                 const msg = await anthropic.messages.create({
                     model: model,
                     max_tokens: config.ai.maxTokens || 1024,
@@ -79,9 +92,9 @@ export const llm = {
                 });
                 responseText = msg.content[0].text;
                 usage = { input_tokens: msg.usage.input_tokens, output_tokens: msg.usage.output_tokens };
+
             } else {
-                const client = model.includes('deepseek') ? deepseek : openai;
-                const res = await client.chat.completions.create({
+                const res = await openai.chat.completions.create({
                     model: model,
                     messages: [{ role: 'system', content: systemPrompt }, ...cleanMessages],
                     temperature: config.ai.temperature || 0.7,
