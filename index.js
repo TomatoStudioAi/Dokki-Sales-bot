@@ -88,8 +88,12 @@ bot.on('message', async (ctx) => {
             parse_mode: 'HTML'
         });
 
-        // Если диалог перехвачен админом — ИИ молчит
-        if (userTopic.admin_override) {
+        // Если диалог перехвачен админом — ИИ молчит (с таймаутом 10 минут)
+        const OVERRIDE_TIMEOUT_MS = 10 * 60 * 1000; // 10 минут
+        const overrideExpired = userTopic.admin_override_at && 
+            (Date.now() - new Date(userTopic.admin_override_at).getTime()) > OVERRIDE_TIMEOUT_MS;
+
+        if (userTopic.admin_override && !overrideExpired) {
             console.log(`[PID:${PID}] 🔇 admin_override для ${userId}, ИИ молчит`);
             return;
         }

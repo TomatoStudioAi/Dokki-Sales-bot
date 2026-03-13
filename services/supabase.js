@@ -36,7 +36,10 @@ export const db = {
   },
 
   setOverride: async (userId, value) => {
-    await supabase.from('user_topics').update({ admin_override: value }).eq('user_id', userId);
+    await supabase.from('user_topics').update({ 
+        admin_override: value,
+        admin_override_at: value ? new Date().toISOString() : null
+    }).eq('user_id', userId);
   },
 
   getUserIdByTopic: async (topicId) => {
