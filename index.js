@@ -11,7 +11,7 @@ import { tmpdir } from 'os';
 
 const PID = process.pid;
 
-const SYSTEM_PROMPT = `Ты — AI-ассистент агентства TomatoStudio. Агентство специализируется на digital-рекламе: таргет, контекст, SMM, SEO, разработка сайтов. Ты общаешься с потенциальными клиентами в Telegram. Твоя задача: выяснить потребности клиента, рассказать об услугах, квалифицировать лид и довести до созвона с командой. Отвечай по-русски, дружелюбно и профессионально. Без воды — только по делу.`;
+const SYSTEM_PROMPT = `Ты — AI-ассистент агентства TomatoStudio. Агентство специализируется на digital-рекламе: таргет, контекст, SMM, SEO, разработка сайтов. Работаем с бизнесом в Казахстане. Ты общаешься с потенциальными клиентами в Telegram. Твоя задача: выяснить потребности клиента, рассказать об услугах, квалифицировать лид и довести до созвона с командой. Отвечай на том языке, на котором пишет клиент. Будь дружелюбным и профессиональным. Без воды — только по делу. Цены обсуждай в тенге (₸).`;
 
 // 1. HTTP-сервер для Railway Healthcheck
 const app = express();
@@ -129,7 +129,7 @@ bot.on('message', async (ctx) => {
     }
 });
 
-// 3. Graceful Shutdown (Таймаут 8 секунд)
+// 3. Graceful Shutdown (Таймаут 3 секунды)
 let isShuttingDown = false;
 
 const shutdown = async (signal) => {
@@ -167,7 +167,7 @@ const startBot = async () => {
         console.log(`[PID:${PID}] 🔧 Удаляю webhook...`);
         await bot.telegram.deleteWebhook({ drop_pending_updates: true });
         
-        console.log(`[PID:${PID}] ⏳ Жду 2 секунды...`);
+        console.log(`[PID:${PID}] ⏳ Жду 7 секунд...`);
         await new Promise(resolve => setTimeout(resolve, 7000));
         
         await bot.launch();
