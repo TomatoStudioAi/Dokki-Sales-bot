@@ -46,8 +46,9 @@ export const db = {
   },
 
   logMessage: async (log) => {
-    await supabase.from('messages_log').insert(log).catch(e => console.error('Ошибка логирования:', e.message));
-  },
+        const { error } = await supabase.from('messages_log').insert(log);
+        if (error) console.error('[logMessage] Ошибка:', error.message);
+    },
 
   // Исправлено формирование истории из парных записей
   getHistory: async (userId) => {
