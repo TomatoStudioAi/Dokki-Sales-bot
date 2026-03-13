@@ -7,7 +7,8 @@ import { calculateCost } from './cost-tracker.js';
 
 const openai = new OpenAI({ apiKey: config.ai.openaiKey });
 const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
-const googleAi = new GoogleGenAI(config.ai.googleApiKey);
+// Инициализация нового SDK ожидает объект настроек
+const googleAi = new GoogleGenAI({ apiKey: config.ai.googleApiKey });
 
 export const llm = {
     /**
@@ -27,7 +28,7 @@ export const llm = {
     },
 
     /**
-     * Склеивает идущие подряд сообщения одной роли для соответствия требованиям API (особенно Anthropic/Gemini)
+     * Склеивает идущие подряд сообщения одной роли для соответствия требованиям API
      */
     _normalizeMessages(messages) {
         if (messages.length === 0) return [];
@@ -63,7 +64,7 @@ export const llm = {
             return config.ai.models.filter; // GPT-4o-mini
         }
 
-        // 3. ЭКСПЕРТИЗА: Конкретика или глубокий диалог (Expert - Gemini 1.5 Flash)
+        // 3. ЭКСПЕРТИЗА: Конкретика или глубокий диалог (Expert - Gemini)
         if (input.includes('бюджет') || input.includes('цена') || input.includes('стоимость') || 
             input.includes('кейс') || input.includes('процесс') || input.includes('как вы') || 
             messageCount >= 8) {
@@ -85,24 +86,23 @@ export const llm = {
         let usage = { input_tokens: 0, output_tokens: 0 };
 
         try {
-            // Ветка Google Gemini
+            // Ветка Google Gemini (Новый SDK @google/genai v1.0)
             if (model.startsWith('gemini-')) {
-                const modelInstance = googleAi.getGenerativeModel({ 
+                const result = await googleAi.models.generateContent({
                     model: model,
-                    systemInstruction: systemPrompt 
-                });
-
-                const result = await modelInstance.generateContent({
                     contents: cleanMessages.map(m => ({
                         role: m.role === 'assistant' ? 'model' : 'user',
                         parts: [{ text: m.content }]
-                    }))
+                    })),
+                    config: {
+                        systemInstruction: systemPrompt
+                    }
                 });
 
-                responseText = result.response.text();
+                responseText = result.text;
                 usage = { 
-                    input_tokens: result.response.usageMetadata?.promptTokenCount || 0, 
-                    output_tokens: result.response.usageMetadata?.candidatesTokenCount || 0 
+                    input_tokens: result.usageMetadata?.promptTokenCount || 0, 
+                    output_tokens: result.usageMetadata?.candidatesTokenCount || 0 
                 };
 
             } else if (model.includes('claude')) {
