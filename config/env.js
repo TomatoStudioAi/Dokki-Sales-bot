@@ -2,7 +2,7 @@ import 'dotenv/config';
 
 const REQUIRED_ENV = [
   'TELEGRAM_BOT_TOKEN', 'ADMIN_GROUP_ID', 'SUPABASE_URL', 
-  'SUPABASE_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY'
+  'SUPABASE_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY'
 ];
 
 for (const key of REQUIRED_ENV) {
@@ -24,13 +24,13 @@ export const config = {
   ai: {
     openaiKey: process.env.OPENAI_API_KEY,
     anthropicKey: process.env.ANTHROPIC_API_KEY,
-    deepseekKey: process.env.DEEPSEEK_API_KEY,
+    googleApiKey: process.env.GOOGLE_API_KEY,
     models: {
-      filter: process.env.LLM_MODEL_FILTER || 'gpt-4o-mini',
-      expert: process.env.LLM_MODEL_EXPERT || 'gemini-3-flash-preview',
-      closer: process.env.LLM_MODEL_CLOSER || 'claude-sonnet-4-6'
+      filter: 'gpt-4o-mini',
+      expert: 'gemini-3-flash-preview',
+      closer: 'claude-sonnet-4-6'
     },
-    temperature: parseFloat(process.env.LLM_TEMPERATURE) || 0.1,
+    temperature: parseFloat(process.env.LLM_TEMPERATURE) || 0.7,
     maxTokens: parseInt(process.env.LLM_MAX_TOKENS) || 1000,
   }
 };
