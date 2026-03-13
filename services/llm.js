@@ -44,13 +44,21 @@ export const llm = {
 
     selectModel(text, messageCount, history) {
         const input = text.toLowerCase();
-        if (input.includes('созвон') || input.includes('встреча') || input.includes('бюджет') || messageCount >= 5) {
-            return config.ai.models.closer;
+        
+        // Премиум: финальные переговоры (договор, встреча, созвон)
+        if (input.includes('договор') || input.includes('созвон') || input.includes('встреча') || input.includes('подписать')) {
+            return config.ai.models.closer; // claude
         }
-        if (input.includes('кейс') || input.includes('процесс') || (messageCount >= 2 && messageCount < 5)) {
-            return config.ai.models.expert;
+        
+        // Средняя: конкретный интерес (бюджет, кейсы, процесс, цены) или долгий диалог
+        if (input.includes('бюджет') || input.includes('цена') || input.includes('стоимость') || 
+            input.includes('кейс') || input.includes('процесс') || input.includes('как вы') || 
+            messageCount >= 4) {
+            return config.ai.models.expert; // deepseek
         }
-        return config.ai.models.filter;
+        
+        // Дешёвая: всё остальное
+        return config.ai.models.filter; // gpt-4o-mini
     },
 
     async ask(model, systemPrompt, history, userMessage) {
@@ -64,8 +72,8 @@ export const llm = {
             if (model.includes('claude')) {
                 const msg = await anthropic.messages.create({
                     model: model,
-                    max_tokens: config.ai.maxTokens,
-                    temperature: config.ai.temperature,
+                    max_tokens: config.ai.maxTokens || 1024,
+                    temperature: config.ai.temperature || 0.7,
                     system: systemPrompt,
                     messages: cleanMessages
                 });
@@ -76,7 +84,7 @@ export const llm = {
                 const res = await client.chat.completions.create({
                     model: model,
                     messages: [{ role: 'system', content: systemPrompt }, ...cleanMessages],
-                    temperature: config.ai.temperature,
+                    temperature: config.ai.temperature || 0.7,
                 });
                 responseText = res.choices[0].message.content;
                 usage = { input_tokens: res.usage.prompt_tokens, output_tokens: res.usage.completion_tokens };
