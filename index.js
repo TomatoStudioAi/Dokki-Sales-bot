@@ -98,7 +98,7 @@ bot.on('message', async (ctx) => {
             return;
         }
 
-        // 2. Работа с историей и выбор модели
+        // 2. Работа с истории и выбор модели
         const history = await db.getHistory(userId);
         const messageCount = history.length / 2;
         const model = llm.selectModel(messageText, messageCount, history);
@@ -112,8 +112,8 @@ bot.on('message', async (ctx) => {
         // Отвечаем клиенту
         await ctx.reply(replyText);
 
-        // Зеркалируем ответ ИИ в топик
-        await ctx.telegram.sendMessage(adminGroupId, `🤖 <b>AI-ассистент [${model}]:</b> ${replyText}`, {
+        // Зеркалируем ответ ИИ в топик (с указанием модели)
+        await ctx.telegram.sendMessage(adminGroupId, `🤖 <b>AI-ассистент [${aiResult.model}]:</b> ${replyText}`, {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'
         });
@@ -123,7 +123,7 @@ bot.on('message', async (ctx) => {
             user_id: userId,
             message_text: messageText,
             bot_response: replyText,
-            model_used: model,
+            model_used: aiResult.model,
             cost_usd: aiResult.cost
         });
 
