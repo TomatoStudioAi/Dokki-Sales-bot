@@ -10,6 +10,9 @@ const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
 const googleAi = new GoogleGenAI(config.ai.googleApiKey);
 
 export const llm = {
+    /**
+     * Превращает голос в текст через Whisper
+     */
     async transcribe(filePath) {
         try {
             const transcription = await openai.audio.transcriptions.create({
@@ -23,6 +26,9 @@ export const llm = {
         }
     },
 
+    /**
+     * Склеивает идущие подряд сообщения одной роли для соответствия требованиям API (особенно Anthropic/Gemini)
+     */
     _normalizeMessages(messages) {
         if (messages.length === 0) return [];
         const normalized = [];
@@ -37,22 +43,40 @@ export const llm = {
         return normalized;
     },
 
+    /**
+     * Выбор модели на основе текста и контекста
+     */
     selectModel(text, messageCount, history) {
-        const input = text.toLowerCase();
+        const input = text.toLowerCase().trim();
         
+        // 1. ПРИОРИТЕТ: Финал сделки (Closer - Claude)
         if (input.includes('договор') || input.includes('созвон') || input.includes('встреча') || input.includes('подписать')) {
-            return config.ai.models.closer; 
+            return config.ai.models.closer;
         }
         
+        // 2. ЗАЩИТА БЮДЖЕТА (Greeting Guard): Приветствия или короткие фразы
+        const isShort = input.length < 20;
+        const isGreeting = input.includes('привет') || input.includes('здравствуй') || 
+                           input.includes('салем') || input.includes('добрый день');
+        
+        if (isShort || isGreeting) {
+            return config.ai.models.filter; // GPT-4o-mini
+        }
+
+        // 3. ЭКСПЕРТИЗА: Конкретика или глубокий диалог (Expert - Gemini 1.5 Flash)
         if (input.includes('бюджет') || input.includes('цена') || input.includes('стоимость') || 
             input.includes('кейс') || input.includes('процесс') || input.includes('как вы') || 
-            messageCount >= 4) {
-            return config.ai.models.expert; 
+            messageCount >= 8) {
+            return config.ai.models.expert;
         }
         
-        return config.ai.models.filter; 
+        // 4. ДЕФОЛТ: GPT-4o-mini
+        return config.ai.models.filter;
     },
 
+    /**
+     * Основной метод запроса к LLM
+     */
     async ask(model, systemPrompt, history, userMessage) {
         const rawMessages = [...history, { role: 'user', content: userMessage }];
         const cleanMessages = this._normalizeMessages(rawMessages);
@@ -76,7 +100,6 @@ export const llm = {
                 });
 
                 responseText = result.response.text();
-                // Gemini API в текущем SDK возвращает токены через отдельный вызов или metadata
                 usage = { 
                     input_tokens: result.response.usageMetadata?.promptTokenCount || 0, 
                     output_tokens: result.response.usageMetadata?.candidatesTokenCount || 0 
