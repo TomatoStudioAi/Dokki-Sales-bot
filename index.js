@@ -110,7 +110,23 @@ bot.on('message', async (ctx) => {
             return;
         }
 
-        const history = await db.getHistory(userId);
+        const HISTORY_TRIGGERS = [
+            'как я говорил', 'вы упоминали', 'мы обсуждали',
+            'помните', 'в прошлый раз', 'тогда', 'раньше',
+            'договаривались', 'вы сказали', 'я писал'
+        ];
+
+        const needsFullHistory = HISTORY_TRIGGERS.some(t => 
+            messageText.toLowerCase().includes(t)
+        );
+
+        const fullHistory = await db.getHistory(userId);
+        const history = needsFullHistory 
+            ? fullHistory 
+            : fullHistory.slice(-6); // последние 6 сообщений = 3 пары
+
+        console.log(`[PID:${PID}] 📚 История: ${needsFullHistory ? 'полная' : `последние ${history.length} сообщ.`}`);
+
         const messageCount = history.length / 2;
         const model = llm.selectModel(messageText, messageCount, history);
 
