@@ -30,7 +30,7 @@ bot.catch((err, ctx) => {
     console.error(`[PID:${PID}] 🚨 Глобальная ошибка Telegraf:`, err.message);
 });
 
-// --- ДОБАВЛЕНО: Команда /reload — только из админ-группы ---
+// --- Команда /reload — только из админ-группы ---
 bot.command('reload', async (ctx) => {
     const adminGroupId = Number(config.telegram.adminGroupId);
     if (Number(ctx.chat.id) !== adminGroupId) return;
@@ -96,6 +96,11 @@ bot.on('message', async (ctx) => {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'
         });
+
+        // --- ФИКС: Игнорируем /start для ИИ, чтобы он не писал первым ---
+        if (messageText === '/start') {
+            return;
+        }
 
         const OVERRIDE_TIMEOUT_MS = 10 * 60 * 1000;
         const overrideExpired = userTopic.admin_override_at && 
