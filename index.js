@@ -133,6 +133,7 @@ bot.on('message', async (ctx) => {
         // Используем загруженный SYSTEM_PROMPT
         const aiResult = await llm.ask(model, SYSTEM_PROMPT, history, messageText);
         const replyText = aiResult.text;
+        console.log(`[PID:${PID}] 🔍 replyText type: ${typeof replyText}, value: "${replyText}"`);
 
         await ctx.reply(replyText);
 
