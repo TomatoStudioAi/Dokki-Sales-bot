@@ -46,10 +46,14 @@ export const db = {
       first_name: topicData.first_name || 'Клиент',
       admin_override: false 
     };
-    const { error } = await supabase.from('user_topics').upsert(record);
+    const { data, error } = await supabase
+      .from('user_topics')
+      .upsert(record)
+      .select()
+      .single();
     
     if (error) throw new Error(`Ошибка БД при сохранении топика: ${error.message}`);
-    return record;
+    return data;
   },
 
   setOverride: async (userId, value) => {
