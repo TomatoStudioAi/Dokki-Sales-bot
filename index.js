@@ -168,17 +168,16 @@ const startBot = async () => {
         }
         
         console.log(`[PID:${PID}] 🚀 Запускаю bot.launch()...`);
-        
-        bot.launch().catch(err => {
-            console.error(`[PID:${PID}] ❌ bot.launch() упал:`, err.message);
-            process.exit(1);
-        });
-        
+        await bot.launch();
         console.log(`[PID:${PID}] ✅ Бот успешно запущен`);
     } catch (err) {
         console.error(`[PID:${PID}] ❌ Ошибка запуска:`, err.message);
         process.exit(1);
     }
 };
+
+// Корректное завершение процессов (graceful shutdown)
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 startBot();
