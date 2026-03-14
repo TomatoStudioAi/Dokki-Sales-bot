@@ -30,7 +30,7 @@ bot.catch((err, ctx) => {
     console.error(`[PID:${PID}] 🚨 Глобальная ошибка Telegraf:`, err.message);
 });
 
-// --- Команда /reload — только из админ-группы ---
+// --- Команда /reload ---
 bot.command('reload', async (ctx) => {
     const adminGroupId = Number(config.telegram.adminGroupId);
     if (Number(ctx.chat.id) !== adminGroupId) return;
@@ -44,7 +44,6 @@ bot.command('reload', async (ctx) => {
     
     SYSTEM_PROMPT = newPrompt;
     ctx.reply(`✅ Промпт обновлён! Новая длина: ${SYSTEM_PROMPT.length} симв.`);
-    console.log(`[PID:${PID}] ✅ Промпт успешно перезагружен через /reload`);
 });
 
 bot.on('message', async (ctx) => {
@@ -60,7 +59,6 @@ bot.on('message', async (ctx) => {
 
     if (ctx.message?.voice) {
         try {
-            console.log(`[PID:${PID}] 🎙️ Голосовое от ${userId}, транскрибирую...`);
             const fileLink = await ctx.telegram.getFileLink(ctx.message.voice.file_id);
             const response = await fetch(fileLink.href);
             const buffer = await response.arrayBuffer();
@@ -69,11 +67,9 @@ bot.on('message', async (ctx) => {
             fs.writeFileSync(tmpPath, Buffer.from(buffer));
             messageText = await llm.transcribe(tmpPath);
             fs.unlinkSync(tmpPath);
-            
-            console.log(`[PID:${PID}] ✅ Транскрипция: "${messageText}"`);
         } catch (e) {
             console.error(`[PID:${PID}] ❌ Ошибка транскрипции:`, e.message);
-            return await ctx.reply('Не смог распознать голосовое. Напишите текстом, пожалуйста.');
+            return await ctx.reply('Не смог распознать голосовое.');
         }
     }
 
@@ -97,47 +93,28 @@ bot.on('message', async (ctx) => {
             parse_mode: 'HTML'
         });
 
-        // --- ФИКС: Игнорируем /start для ИИ, чтобы он не писал первым ---
-        if (messageText === '/start') {
-            return;
-        }
+        if (messageText === '/start') return;
 
         const OVERRIDE_TIMEOUT_MS = 10 * 60 * 1000;
         const overrideExpired = userTopic.admin_override_at && 
             (Date.now() - new Date(userTopic.admin_override_at).getTime()) > OVERRIDE_TIMEOUT_MS;
 
-        if (userTopic.admin_override && !overrideExpired) {
-            return;
-        }
-
-        const HISTORY_TRIGGERS = [
-            'как я говорил', 'вы упоминали', 'мы обсуждали',
-            'помните', 'в прошлый раз', 'тогда', 'раньше',
-            'договаривались', 'вы сказали', 'я писал'
-        ];
-
-        const needsFullHistory = HISTORY_TRIGGERS.some(t => 
-            messageText.toLowerCase().includes(t)
-        );
+        if (userTopic.admin_override && !overrideExpired) return;
 
         const fullHistory = await db.getHistory(userId);
-        const history = needsFullHistory 
-            ? fullHistory 
-            : fullHistory.slice(-6); // последние 6 сообщений = 3 пары
+        const history = fullHistory.slice(-6);
 
-        console.log(`[PID:${PID}] 📚 История: ${needsFullHistory ? 'полная' : `последние ${history.length} сообщ.`}`);
-
-        const messageCount = history.length / 2;
-        const model = llm.selectModel(messageText, messageCount, history);
-
-        // Используем загруженный SYSTEM_PROMPT
+        const model = llm.selectModel(messageText, history.length / 2, history);
         const aiResult = await llm.ask(model, SYSTEM_PROMPT, history, messageText);
+        
         const replyText = aiResult.text;
+        
+        // Лог для проверки типа и содержания ответа
         console.log(`[PID:${PID}] 🔍 replyText type: ${typeof replyText}, value: "${replyText}"`);
-
+        
         await ctx.reply(replyText);
 
-        await ctx.telegram.sendMessage(adminGroupId, `🤖 <b>AI-ассистент [${aiResult.model}]:</b> ${replyText}`, {
+        await ctx.telegram.sendMessage(adminGroupId, `🤖 <b>AI [${aiResult.model}]:</b> ${replyText}`, {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'
         });
@@ -152,18 +129,9 @@ bot.on('message', async (ctx) => {
 
     } catch (e) {
         console.error(`[PID:${PID}] ❌ Ошибка обработчика:`, e.message);
-        await ctx.reply('Извините, техническая ошибка. Менеджер уже уведомлён.');
+        await ctx.reply('Извините, техническая ошибка.');
     }
 });
-
-const shutdown = async (signal) => {
-    console.log(`[PID:${PID}] ⚠️ ${signal} получен, завершаю...`);
-    await bot.stop(signal);
-    process.exit(0);
-};
-
-process.once('SIGTERM', () => shutdown('SIGTERM'));
-process.once('SIGINT', () => shutdown('SIGINT'));
 
 const startBot = async () => {
     try {
@@ -171,14 +139,32 @@ const startBot = async () => {
         SYSTEM_PROMPT = await db.getConfig('system_prompt');
 
         if (!SYSTEM_PROMPT) {
-            throw new Error('Критическая ошибка: SYSTEM_PROMPT не найден в таблице bot_config!');
+            throw new Error('Критическая ошибка: SYSTEM_PROMPT не найден!');
         }
         
         console.log(`[PID:${PID}] ✅ Конфиг загружен. Длина промпта: ${SYSTEM_PROMPT.length} симв.`);
         
-        await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        await bot.launch();
+        console.log(`[PID:${PID}] 🔄 Удаляю вебхук (таймаут 5с)...`);
+        
+        // Защита от бесконечного зависания deleteWebhook
+        try {
+            await Promise.race([
+                bot.telegram.deleteWebhook({ drop_pending_updates: true }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('deleteWebhook timeout')), 5000))
+            ]);
+            console.log(`[PID:${PID}] ✅ Вебхук удалён.`);
+        } catch (webhookError) {
+            console.warn(`[PID:${PID}] ⚠️ Предупреждение по вебхуку: ${webhookError.message}. Идем дальше...`);
+        }
+        
+        console.log(`[PID:${PID}] 🚀 Запускаю bot.launch()...`);
+        
+        // Fire-and-forget запуск без await, чтобы не блокировать процесс
+        bot.launch().catch(err => {
+            console.error(`[PID:${PID}] ❌ bot.launch() упал:`, err.message);
+            process.exit(1);
+        });
+        
         console.log(`[PID:${PID}] ✅ Бот успешно запущен`);
     } catch (err) {
         console.error(`[PID:${PID}] ❌ Ошибка запуска:`, err.message);
