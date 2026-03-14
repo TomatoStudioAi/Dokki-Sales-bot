@@ -54,6 +54,10 @@ export const llm = {
 
         if (input.includes('бюджет') || input.includes('цена') || input.includes('стоимость') || 
             input.includes('кейс') || input.includes('процесс') || input.includes('как вы') || 
+            input.includes('дорого') || input.includes('дешевле') || input.includes('скидк') || 
+            input.includes('почему так') || input.includes('конкурент') || input.includes('смм') || 
+            input.includes('сайт') || input.includes('реклам') || input.includes('брендинг') || 
+            input.includes('видео') || 
             messageCount >= 8) {
             return config.ai.models.expert;
         }
