@@ -82,12 +82,10 @@ export const llm = {
                     })),
                     config: {
                         systemInstruction: systemPrompt,
-                        generationConfig: {
-                            temperature: 0.7,
-                            topP: 0.95,
-                            topK: 40,
-                            maxOutputTokens: 1024,
-                        },
+                        temperature: 0.7,
+                        topP: 0.95,
+                        topK: 40,
+                        maxOutputTokens: 1024,
                         safetySettings: [
                             { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
                             { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
