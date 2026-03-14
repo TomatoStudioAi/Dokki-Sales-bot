@@ -30,6 +30,23 @@ bot.catch((err, ctx) => {
     console.error(`[PID:${PID}] 🚨 Глобальная ошибка Telegraf:`, err.message);
 });
 
+// --- ДОБАВЛЕНО: Команда /reload — только из админ-группы ---
+bot.command('reload', async (ctx) => {
+    const adminGroupId = Number(config.telegram.adminGroupId);
+    if (Number(ctx.chat.id) !== adminGroupId) return;
+    
+    console.log(`[PID:${PID}] 🔄 Запрос на обновление промпта...`);
+    const newPrompt = await db.getConfig('system_prompt');
+    
+    if (!newPrompt) {
+        return ctx.reply('❌ Ошибка: system_prompt не найден в БД');
+    }
+    
+    SYSTEM_PROMPT = newPrompt;
+    ctx.reply(`✅ Промпт обновлён! Новая длина: ${SYSTEM_PROMPT.length} симв.`);
+    console.log(`[PID:${PID}] ✅ Промпт успешно перезагружен через /reload`);
+});
+
 bot.on('message', async (ctx) => {
     const chatId = Number(ctx.chat.id);
     const adminGroupId = Number(config.telegram.adminGroupId);
@@ -117,7 +134,6 @@ bot.on('message', async (ctx) => {
     }
 });
 
-// Завершение работы
 const shutdown = async (signal) => {
     console.log(`[PID:${PID}] ⚠️ ${signal} получен, завершаю...`);
     await bot.stop(signal);
@@ -127,7 +143,6 @@ const shutdown = async (signal) => {
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 process.once('SIGINT', () => shutdown('SIGINT'));
 
-// Запуск
 const startBot = async () => {
     try {
         console.log(`[PID:${PID}] 📥 Загружаю SYSTEM_PROMPT из Supabase...`);
