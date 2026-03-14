@@ -6,9 +6,6 @@ const supabase = createClient(config.supabase.url, config.supabase.key);
 export const db = {
   supabase,
 
-  /**
-   * Получение настройки из таблицы конфигурации
-   */
   getConfig: async (key) => {
     try {
       const { data, error } = await supabase
@@ -56,6 +53,14 @@ export const db = {
     return data;
   },
 
+  updateTopicId: async (userId, topicId) => {
+    const { error } = await supabase
+        .from('user_topics')
+        .update({ topic_id: topicId })
+        .eq('user_id', userId);
+    if (error) throw new Error(`Ошибка обновления topic_id: ${error.message}`);
+  },
+
   setOverride: async (userId, value) => {
     await supabase.from('user_topics').update({ 
         admin_override: value,
@@ -72,7 +77,7 @@ export const db = {
   logMessage: async (log) => {
         const { error } = await supabase.from('messages_log').insert(log);
         if (error) console.error('[logMessage] Ошибка:', error.message);
-    },
+  },
 
   getHistory: async (userId) => {
     const { data, error } = await supabase

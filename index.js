@@ -11,7 +11,6 @@ import { tmpdir } from 'os';
 
 const PID = process.pid;
 
-// Переменная для хранения промпта в памяти
 let SYSTEM_PROMPT = null;
 
 const app = express();
@@ -30,7 +29,6 @@ bot.catch((err, ctx) => {
     console.error(`[PID:${PID}] 🚨 Глобальная ошибка Telegraf:`, err.message);
 });
 
-// --- Команда /reload ---
 bot.command('reload', async (ctx) => {
     const adminGroupId = Number(config.telegram.adminGroupId);
     if (Number(ctx.chat.id) !== adminGroupId) return;
@@ -88,10 +86,24 @@ bot.on('message', async (ctx) => {
             });
         }
 
-        await ctx.telegram.sendMessage(adminGroupId, `👤 <b>${ctx.from.first_name}:</b> ${messageText}`, {
-            message_thread_id: userTopic.topic_id,
-            parse_mode: 'HTML'
-        });
+        try {
+            await ctx.telegram.sendMessage(adminGroupId, `👤 <b>${ctx.from.first_name}:</b> ${messageText}`, {
+                message_thread_id: userTopic.topic_id,
+                parse_mode: 'HTML'
+            });
+        } catch (e) {
+            if (e.message.includes('message thread not found')) {
+                const newTopicId = await topics.create(ctx, ctx.from.first_name, ctx.from.username);
+                await db.updateTopicId(userId, newTopicId);
+                userTopic.topic_id = newTopicId;
+                await ctx.telegram.sendMessage(adminGroupId, `👤 <b>${ctx.from.first_name}:</b> ${messageText}`, {
+                    message_thread_id: userTopic.topic_id,
+                    parse_mode: 'HTML'
+                });
+            } else {
+                throw e;
+            }
+        }
 
         if (messageText === '/start') return;
 
@@ -109,7 +121,6 @@ bot.on('message', async (ctx) => {
         
         const replyText = aiResult.text;
         
-        // Лог для проверки типа и содержания ответа
         console.log(`[PID:${PID}] 🔍 replyText type: ${typeof replyText}, value: "${replyText}"`);
         
         await ctx.reply(replyText);
@@ -146,7 +157,6 @@ const startBot = async () => {
         
         console.log(`[PID:${PID}] 🔄 Удаляю вебхук (таймаут 5с)...`);
         
-        // Защита от бесконечного зависания deleteWebhook
         try {
             await Promise.race([
                 bot.telegram.deleteWebhook({ drop_pending_updates: true }),
@@ -159,7 +169,6 @@ const startBot = async () => {
         
         console.log(`[PID:${PID}] 🚀 Запускаю bot.launch()...`);
         
-        // Fire-and-forget запуск без await, чтобы не блокировать процесс
         bot.launch().catch(err => {
             console.error(`[PID:${PID}] ❌ bot.launch() упал:`, err.message);
             process.exit(1);
