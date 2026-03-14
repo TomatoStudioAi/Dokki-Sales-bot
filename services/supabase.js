@@ -4,8 +4,26 @@ import { config } from '../config/env.js';
 const supabase = createClient(config.supabase.url, config.supabase.key);
 
 export const db = {
-  // Экспортируем сам клиент для прямых запросов в index.js
   supabase,
+
+  /**
+   * Получение настройки из таблицы конфигурации
+   */
+  getConfig: async (key) => {
+    try {
+      const { data, error } = await supabase
+        .from('bot_config')
+        .select('value')
+        .eq('key', key)
+        .single();
+
+      if (error) throw error;
+      return data?.value || null;
+    } catch (e) {
+      console.error(`❌ Ошибка получения конфига (${key}):`, e.message);
+      return null;
+    }
+  },
 
   getTopic: async (userId) => {
     const { data, error } = await supabase
@@ -20,7 +38,6 @@ export const db = {
     return data || null;
   },
 
-  // Изменено название и аргументы под вызов в index.js
   createTopic: async (topicData) => {
     const record = { 
       user_id: topicData.user_id, 
@@ -53,7 +70,6 @@ export const db = {
         if (error) console.error('[logMessage] Ошибка:', error.message);
     },
 
-  // Исправлено формирование истории из парных записей
   getHistory: async (userId) => {
     const { data, error } = await supabase
       .from('messages_log')

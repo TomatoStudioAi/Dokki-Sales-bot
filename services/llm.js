@@ -7,13 +7,9 @@ import { calculateCost } from './cost-tracker.js';
 
 const openai = new OpenAI({ apiKey: config.ai.openaiKey });
 const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
-// Инициализация нового SDK ожидает объект настроек
 const googleAi = new GoogleGenAI({ apiKey: config.ai.googleApiKey });
 
 export const llm = {
-    /**
-     * Превращает голос в текст через Whisper
-     */
     async transcribe(filePath) {
         try {
             const transcription = await openai.audio.transcriptions.create({
@@ -27,9 +23,6 @@ export const llm = {
         }
     },
 
-    /**
-     * Склеивает идущие подряд сообщения одной роли для соответствия требованиям API
-     */
     _normalizeMessages(messages) {
         if (messages.length === 0) return [];
         const normalized = [];
@@ -44,40 +37,30 @@ export const llm = {
         return normalized;
     },
 
-    /**
-     * Выбор модели на основе текста и контекста
-     */
     selectModel(text, messageCount, history) {
         const input = text.toLowerCase().trim();
         
-        // 1. ПРИОРИТЕТ: Финал сделки (Closer - Claude)
         if (input.includes('договор') || input.includes('созвон') || input.includes('встреча') || input.includes('подписать')) {
             return config.ai.models.closer;
         }
         
-        // 2. ЗАЩИТА БЮДЖЕТА (Greeting Guard): Приветствия или короткие фразы
         const isShort = input.length < 20;
         const isGreeting = input.includes('привет') || input.includes('здравствуй') || 
                            input.includes('салем') || input.includes('добрый день');
         
         if (isShort || isGreeting) {
-            return config.ai.models.filter; // GPT-4o-mini
+            return config.ai.models.filter;
         }
 
-        // 3. ЭКСПЕРТИЗА: Конкретика или глубокий диалог (Expert - Gemini)
         if (input.includes('бюджет') || input.includes('цена') || input.includes('стоимость') || 
             input.includes('кейс') || input.includes('процесс') || input.includes('как вы') || 
             messageCount >= 8) {
             return config.ai.models.expert;
         }
         
-        // 4. ДЕФОЛТ: GPT-4o-mini
         return config.ai.models.filter;
     },
 
-    /**
-     * Основной метод запроса к LLM
-     */
     async ask(model, systemPrompt, history, userMessage) {
         const rawMessages = [...history, { role: 'user', content: userMessage }];
         const cleanMessages = this._normalizeMessages(rawMessages);
@@ -86,7 +69,6 @@ export const llm = {
         let usage = { input_tokens: 0, output_tokens: 0 };
 
         try {
-            // Ветка Google Gemini (Новый SDK @google/genai v1.0)
             if (model.startsWith('gemini-')) {
                 const result = await googleAi.models.generateContent({
                     model: model,
@@ -95,7 +77,19 @@ export const llm = {
                         parts: [{ text: m.content }]
                     })),
                     config: {
-                        systemInstruction: systemPrompt
+                        systemInstruction: systemPrompt,
+                        generationConfig: {
+                            temperature: 0.7,
+                            topP: 0.95,
+                            topK: 40,
+                            maxOutputTokens: 1024,
+                        },
+                        safetySettings: [
+                            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+                            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+                            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+                            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' }
+                        ]
                     }
                 });
 
