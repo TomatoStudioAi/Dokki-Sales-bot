@@ -13,17 +13,21 @@ const PID = process.pid;
 
 let SYSTEM_PROMPT = null;
 
+// Инициализируем бота до Express, чтобы передать его в middleware
+const bot = new Telegraf(config.telegram.token);
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => res.send(`Bot PID ${PID} is running`));
 app.get('/health', (req, res) => res.json({ status: 'ok', pid: PID, uptime: process.uptime() }));
 
+// Интеграция вебхука с Express
+app.use(bot.webhookCallback('/webhook'));
+
 const server = app.listen(PORT, () => {
     console.log(`[PID:${PID}] ✅ HTTP server listening on port ${PORT}`);
 });
-
-const bot = new Telegraf(config.telegram.token);
 
 bot.catch((err, ctx) => {
     console.error(`[PID:${PID}] 🚨 Глобальная ошибка Telegraf:`, err.message);
@@ -155,28 +159,23 @@ const startBot = async () => {
         
         console.log(`[PID:${PID}] ✅ Конфиг загружен. Длина промпта: ${SYSTEM_PROMPT.length} симв.`);
         
-        console.log(`[PID:${PID}] 🔄 Удаляю вебхук (таймаут 5с)...`);
-        
-        try {
-            await Promise.race([
-                bot.telegram.deleteWebhook({ drop_pending_updates: true }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('deleteWebhook timeout')), 5000))
-            ]);
-            console.log(`[PID:${PID}] ✅ Вебхук удалён.`);
-        } catch (webhookError) {
-            console.warn(`[PID:${PID}] ⚠️ Предупреждение по вебхуку: ${webhookError.message}. Идем дальше...`);
+        const WEBHOOK_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN;
+        if (!WEBHOOK_DOMAIN) {
+            throw new Error('Критическая ошибка: RAILWAY_PUBLIC_DOMAIN не задан!');
         }
+
+        const webhookUrl = `https://${WEBHOOK_DOMAIN}/webhook`;
+        console.log(`[PID:${PID}] 🔄 Устанавливаю вебхук: ${webhookUrl}`);
         
-        console.log(`[PID:${PID}] 🚀 Запускаю bot.launch()...`);
-        await bot.launch();
-        console.log(`[PID:${PID}] ✅ Бот успешно запущен`);
+        await bot.telegram.setWebhook(webhookUrl);
+        
+        console.log(`[PID:${PID}] ✅ Бот успешно запущен на вебхуках`);
     } catch (err) {
         console.error(`[PID:${PID}] ❌ Ошибка запуска:`, err.message);
         process.exit(1);
     }
 };
 
-// Корректное завершение процессов (graceful shutdown)
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
