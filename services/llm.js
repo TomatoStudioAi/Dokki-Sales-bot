@@ -39,30 +39,25 @@ export const llm = {
 
     selectModel(text, messageCount, history) {
         const input = text.toLowerCase().trim();
-        
-        if (input.includes('договор') || input.includes('созвон') || input.includes('встреча') || input.includes('подписать')) {
+
+        const isComplex = input.length > 100 ||
+            ['почему', 'как ', 'сравни', 'объясни', 'помоги', 'посоветуй', 
+             'расскажи', 'что лучше', 'какой', 'стоит ли', 'договор', 
+             'созвон', 'встреча', 'подписать'].some(w => input.includes(w));
+
+        if (isComplex || messageCount >= 5) {
             return config.ai.models.closer;
         }
-        
-        const isShort = input.length < 20;
-        const isGreeting = input.includes('привет') || input.includes('здравствуй') || 
-                           input.includes('салем') || input.includes('добрый день');
-        
-        if (isShort || isGreeting) {
+
+        const isSimple = input.length < 15 ||
+            ['привет', 'здравствуй', 'салем', 'добрый', 'хай', 'hello']
+                .some(w => input.includes(w));
+
+        if (isSimple) {
             return config.ai.models.filter;
         }
 
-        if (input.includes('бюджет') || input.includes('цена') || input.includes('стоимость') || 
-            input.includes('кейс') || input.includes('процесс') || input.includes('как вы') || 
-            input.includes('дорого') || input.includes('дешевле') || input.includes('скидк') || 
-            input.includes('почему так') || input.includes('конкурент') || input.includes('смм') || 
-            input.includes('сайт') || input.includes('реклам') || input.includes('брендинг') || 
-            input.includes('видео') || 
-            messageCount >= 8) {
-            return config.ai.models.expert;
-        }
-        
-        return config.ai.models.filter;
+        return config.ai.models.expert;
     },
 
     async ask(model, systemPrompt, history, userMessage) {
@@ -85,7 +80,7 @@ export const llm = {
                         temperature: 0.7,
                         topP: 0.95,
                         topK: 40,
-                        maxOutputTokens: 1024,
+                        maxOutputTokens: 2048,
                         safetySettings: [
                             { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
                             { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
