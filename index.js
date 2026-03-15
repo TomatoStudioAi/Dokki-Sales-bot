@@ -129,6 +129,36 @@ bot.on('message', async (ctx) => {
         
         await ctx.reply(replyText);
 
+        // --- ИНТЕГРАЦИЯ: УВЕДОМЛЕНИЕ МЕНЕДЖЕРА ---
+        const managerTriggers = [
+            'передам менеджеру', 'свяжется менеджер', 'менеджер ответит', 
+            'специалист свяжется', 'оставьте номер', 'оставьте ваш номер',
+            'заявка принята', 'подключится человек'
+        ];
+
+        if (managerTriggers.some(t => replyText.toLowerCase().includes(t))) {
+            const clientName = ctx.from.first_name || 'Клиент';
+            const clientUsername = ctx.from.username ? `@${ctx.from.username}` : 'Без юзернейма';
+            const cleanGroupId = String(config.telegram.adminGroupId).replace('-100', '');
+            const clientTopicLink = `https://t.me/c/${cleanGroupId}/${userTopic.topic_id}`;
+
+            const alertHTML = `🔔 <b>ТРЕБУЕТСЯ МЕНЕДЖЕР</b>\n\n` +
+                              `👤 <b>Клиент:</b> ${clientName} (${clientUsername})\n` +
+                              `❓ <b>Вопрос:</b> ${messageText.slice(0, 100)}${messageText.length > 100 ? '...' : ''}\n\n` +
+                              `🔗 <a href="${clientTopicLink}">Перейти к диалогу</a>`;
+
+            try {
+                await ctx.telegram.sendMessage(config.telegram.adminGroupId, alertHTML, {
+                    message_thread_id: config.telegram.alertsTopicId,
+                    parse_mode: 'HTML',
+                    disable_web_page_preview: true
+                });
+            } catch (err) {
+                console.error(`[PID:${PID}] ❌ Ошибка уведомления менеджера:`, err.message);
+            }
+        }
+        // ----------------------------------------
+
         await ctx.telegram.sendMessage(adminGroupId, `🤖 <b>AI [${aiResult.model}]:</b> ${replyText}`, {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'

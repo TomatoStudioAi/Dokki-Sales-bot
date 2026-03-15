@@ -16,6 +16,7 @@ export const config = {
   telegram: {
     token: process.env.TELEGRAM_BOT_TOKEN,
     adminGroupId: Number(process.env.ADMIN_GROUP_ID),
+    alertsTopicId: parseInt(process.env.ALERTS_TOPIC_ID) || 194,
   },
   supabase: {
     url: process.env.SUPABASE_URL,
@@ -31,6 +32,6 @@ export const config = {
       closer: 'claude-sonnet-4-6'
     },
     temperature: parseFloat(process.env.LLM_TEMPERATURE) || 0.7,
-    maxTokens: parseInt(process.env.LLM_MAX_TOKENS) || 1000,
+    maxTokens: parseInt(process.env.LLM_MAX_TOKENS) || 1000, // Возвращено к 1000
   }
 };
