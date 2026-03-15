@@ -140,29 +140,37 @@ bot.on('message', async (ctx) => {
             'перезвон',    // перезвоним, перезвонит
         ];
 
-        console.log(`[PID:${PID}] 🔍 Manager check: alertsTopicId=${config.telegram.alertsTopicId}, needsManager=${managerTriggers.some(t => replyText.toLowerCase().includes(t))}`);
+        const lowerCaseReply = (replyText || "").toLowerCase();
+        const needsManager = managerTriggers.some(t => lowerCaseReply.includes(t));
 
-        const needsManager = managerTriggers.some(trigger => replyText.toLowerCase().includes(trigger));
+        console.log(`[PID:${PID}] 🔍 Manager check: topic=${config.telegram.alertsTopicId}, triggered=${needsManager}`);
 
         if (needsManager) {
-            const clientName = ctx.from.first_name || 'Клиент';
-            const clientUsername = ctx.from.username ? `@${ctx.from.username}` : 'Без юзернейма';
-            const cleanGroupId = String(config.telegram.adminGroupId).replace('-100', '');
-            const clientTopicLink = `https://t.me/c/${cleanGroupId}/${userTopic.topic_id}`;
-
-            const alertHTML = `🔔 <b>ТРЕБУЕТСЯ МЕНЕДЖЕР</b>\n\n` +
-                              `👤 <b>Клиент:</b> ${clientName} (${clientUsername})\n` +
-                              `❓ <b>Вопрос:</b> ${messageText.slice(0, 100)}${messageText.length > 100 ? '...' : ''}\n\n` +
-                              `🔗 <a href="${clientTopicLink}">Перейти к диалогу</a>`;
-
             try {
+                const clientName = ctx.from?.first_name || 'Клиент';
+                const clientUsername = ctx.from?.username ? `@${ctx.from.username}` : 'Без юзернейма';
+                
+                const safeQuestion = typeof messageText === 'string' ? messageText : 'Вложение или медиа';
+                const questionSnippet = safeQuestion.slice(0, 100);
+
+                const cleanGroupId = String(config.telegram.adminGroupId).replace('-100', '');
+                const topicId = userTopic?.topic_id;
+                const clientTopicLink = topicId 
+                    ? `https://t.me/c/${cleanGroupId}/${topicId}`
+                    : 'Ссылка недоступна';
+
+                const alertHTML = `🔔 <b>ТРЕБУЕТСЯ МЕНЕДЖЕР</b>\n\n` +
+                                  `👤 <b>Клиент:</b> ${clientName} (${clientUsername})\n` +
+                                  `❓ <b>Вопрос:</b> ${questionSnippet}${safeQuestion.length > 100 ? '...' : ''}\n\n` +
+                                  `🔗 <a href="${clientTopicLink}">Перейти к диалогу</a>`;
+
                 await ctx.telegram.sendMessage(config.telegram.adminGroupId, alertHTML, {
                     message_thread_id: config.telegram.alertsTopicId,
                     parse_mode: 'HTML',
                     disable_web_page_preview: true
                 });
             } catch (err) {
-                console.error(`[PID:${PID}] ❌ Ошибка уведомления менеджера:`, err.message);
+                console.error(`[PID:${PID}] ❌ Ошибка внутри блока алерта:`, err.message);
             }
         }
         // ----------------------------------------
