@@ -131,12 +131,20 @@ bot.on('message', async (ctx) => {
 
         // --- ИНТЕГРАЦИЯ: УВЕДОМЛЕНИЕ МЕНЕДЖЕРА ---
         const managerTriggers = [
-            'передам менеджеру', 'свяжется менеджер', 'менеджер ответит', 
-            'специалист свяжется', 'оставьте номер', 'оставьте ваш номер',
-            'заявка принята', 'подключится человек'
+            'переда',      // передал, передаю, передам
+            'менеджер',    // менеджер свяжется, менеджер ответит
+            'свяжет',      // свяжется, свяжет
+            'специалист',  // специалист свяжется
+            'заявк',       // заявка принята, заявку передал
+            'подключит',   // подключится человек
+            'перезвон',    // перезвоним, перезвонит
         ];
 
-        if (managerTriggers.some(t => replyText.toLowerCase().includes(t))) {
+        console.log(`[PID:${PID}] 🔍 Manager check: alertsTopicId=${config.telegram.alertsTopicId}, needsManager=${managerTriggers.some(t => replyText.toLowerCase().includes(t))}`);
+
+        const needsManager = managerTriggers.some(trigger => replyText.toLowerCase().includes(trigger));
+
+        if (needsManager) {
             const clientName = ctx.from.first_name || 'Клиент';
             const clientUsername = ctx.from.username ? `@${ctx.from.username}` : 'Без юзернейма';
             const cleanGroupId = String(config.telegram.adminGroupId).replace('-100', '');
