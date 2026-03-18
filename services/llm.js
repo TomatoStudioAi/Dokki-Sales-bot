@@ -40,6 +40,8 @@ export const llm = {
     selectModel(text, messageCount, history) {
         const input = text.toLowerCase().trim();
 
+        // ВРЕМЕННО: тест Gemini без Claude (отключаем ветку closer)
+        /*
         const isComplex = input.length > 100 ||
             ['почему', 'как ', 'сравни', 'объясни', 'помоги', 'посоветуй', 
              'расскажи', 'что лучше', 'какой', 'стоит ли', 'договор', 
@@ -48,6 +50,7 @@ export const llm = {
         if (isComplex || messageCount >= 5) {
             return config.ai.models.closer;
         }
+        */
 
         const isSimple = input.length < 15 ||
             ['привет', 'здравствуй', 'салем', 'добрый', 'хай', 'hello']
@@ -57,6 +60,7 @@ export const llm = {
             return config.ai.models.filter;
         }
 
+        // Теперь все сложные и закрывающие запросы падают сюда
         return config.ai.models.expert;
     },
 
