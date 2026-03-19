@@ -4,6 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import { config } from '../config/env.js';
 import { calculateCost } from './cost-tracker.js';
+import { supabase } from '../config/supabase.js';
 
 const openai = new OpenAI({ apiKey: config.ai.openaiKey });
 const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
@@ -37,33 +38,59 @@ export const llm = {
         return normalized;
     },
 
+    // RAG: Получение знаний по категории
+    async getRelevantKnowledge(userInput) {
+        const input = userInput.toLowerCase().trim();
+        let category = null;
+
+        if (input.includes('сайт') || input.includes('тильда') || input.includes('tilda')) category = 'sites';
+        else if (input.includes('smm') || input.includes('смм') || input.includes('инстаграм')) category = 'smm';
+        else if (input.includes('таргет') || input.includes('meta') || input.includes('фейсбук')) category = 'ads_target';
+        else if (input.includes('google') || input.includes('гугл') || input.includes('контекст')) category = 'ads_google';
+        else if (input.includes('видео') || input.includes('ролик') || input.includes('съемка')) category = 'video';
+        else if (input.includes('лого') || input.includes('бренд') || input.includes('стиль')) category = 'branding';
+        else if (input.includes('печать') || input.includes('визитк') || input.includes('меню')) category = 'print';
+        else if (input.includes('гарант') || input.includes('договор') || input.includes('оплата') || input.includes('ндс')) category = 'guarantees';
+
+        if (!category) return "";
+
+        try {
+            const { data, error } = await supabase
+                .from('kb_entries')
+                .select('content')
+                .eq('category', category)
+                .limit(1)
+                .maybeSingle();
+
+            if (error || !data) return "";
+            return `\n\nИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ (КАТЕГОРИЯ ${category.toUpperCase()}):\n${data.content}`;
+        } catch (err) {
+            console.error('⚠️ Ошибка RAG:', err.message);
+            return "";
+        }
+    },
+
     selectModel(text, messageCount, history) {
         const input = text.toLowerCase().trim();
-
-        // ВРЕМЕННО: тест Gemini без Claude (отключаем ветку closer)
+        
+        // ВРЕМЕННО: тест Gemini без Claude
         /*
-        const isComplex = input.length > 100 ||
-            ['почему', 'как ', 'сравни', 'объясни', 'помоги', 'посоветуй', 
-             'расскажи', 'что лучше', 'какой', 'стоит ли', 'договор', 
-             'созвон', 'встреча', 'подписать'].some(w => input.includes(w));
-
-        if (isComplex || messageCount >= 5) {
-            return config.ai.models.closer;
-        }
+        const isComplex = input.length > 100 || 
+            ['почему', 'как', 'сравни', 'объясни', 'договор', 'созвон'].some(w => input.includes(w));
+        if (isComplex || messageCount >= 5) return config.ai.models.closer;
         */
 
         const isSimple = input.length < 15 ||
-            ['привет', 'здравствуй', 'салем', 'добрый', 'хай', 'hello']
-                .some(w => input.includes(w));
+            ['привет', 'здравствуй', 'салем', 'хай'].some(w => input.includes(w));
 
-        if (isSimple) {
-            return config.ai.models.filter;
-        }
-
-        return config.ai.models.expert;
+        return isSimple ? config.ai.models.filter : config.ai.models.expert;
     },
 
     async ask(model, systemPrompt, history, userMessage) {
+        // Подгружаем знания из базы перед запросом
+        const extraKnowledge = await this.getRelevantKnowledge(userMessage);
+        const fullSystemPrompt = systemPrompt + extraKnowledge;
+
         const rawMessages = [...history, { role: 'user', content: userMessage }];
         const cleanMessages = this._normalizeMessages(rawMessages);
 
@@ -79,8 +106,8 @@ export const llm = {
                         parts: [{ text: m.content }]
                     })),
                     config: {
-                        systemInstruction: systemPrompt,
-                        temperature: 0.4, // Снижено для точности
+                        systemInstruction: fullSystemPrompt,
+                        temperature: 0.4,
                         topP: 0.95,
                         topK: 40,
                         maxOutputTokens: 2048,
@@ -104,7 +131,7 @@ export const llm = {
                     model: model,
                     max_tokens: config.ai.maxTokens || 1024,
                     temperature: config.ai.temperature || 0.7,
-                    system: systemPrompt,
+                    system: fullSystemPrompt,
                     messages: cleanMessages
                 });
                 responseText = msg.content[0].text;
@@ -113,7 +140,7 @@ export const llm = {
             } else {
                 const res = await openai.chat.completions.create({
                     model: model,
-                    messages: [{ role: 'system', content: systemPrompt }, ...cleanMessages],
+                    messages: [{ role: 'system', content: fullSystemPrompt }, ...cleanMessages],
                     temperature: config.ai.temperature || 0.7,
                 });
                 responseText = res.choices[0].message.content;
