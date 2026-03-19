@@ -60,7 +60,6 @@ export const llm = {
             return config.ai.models.filter;
         }
 
-        // Теперь все сложные и закрывающие запросы падают сюда
         return config.ai.models.expert;
     },
 
@@ -81,15 +80,15 @@ export const llm = {
                     })),
                     config: {
                         systemInstruction: systemPrompt,
-                        temperature: 0.7,
+                        temperature: 0.4, // Снижено для точности
                         topP: 0.95,
                         topK: 40,
                         maxOutputTokens: 2048,
                         safetySettings: [
-                            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
-                            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+                            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
                             { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
-                            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' }
+                            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
                         ]
                     }
                 });
