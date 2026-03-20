@@ -4,7 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import { config } from '../config/env.js';
 import { calculateCost } from './cost-tracker.js';
-import { supabase } from '../config/supabase.js';
+import { supabase } from './supabase.js';
 
 const openai = new OpenAI({ apiKey: config.ai.openaiKey });
 const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
