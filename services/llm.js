@@ -43,18 +43,31 @@ export const llm = {
         const input = userInput.toLowerCase().trim();
         let category = null;
 
-        if (input.includes('сайт') || input.includes('тильда') || input.includes('tilda')) category = 'sites';
-        else if (input.includes('smm') || input.includes('смм') || input.includes('инстаграм')) category = 'smm';
-        else if (input.includes('таргет') || input.includes('meta') || input.includes('фейсбук')) category = 'ads_target';
-        else if (input.includes('google') || input.includes('гугл') || input.includes('контекст')) category = 'ads_google';
-        else if (input.includes('видео') || input.includes('ролик') || input.includes('съемка')) category = 'video';
-        else if (input.includes('лого') || input.includes('бренд') || input.includes('стиль')) category = 'branding';
-        else if (input.includes('печать') || input.includes('визитк') || input.includes('меню')) category = 'print';
-        else if (input.includes('гарант') || input.includes('договор') || input.includes('оплата') || input.includes('ндс')) category = 'guarantees';
+        // Расширенные триггеры для всех категорий
+        if (input.includes('сайт') || input.includes('тильда') || input.includes('tilda') || input.includes('разработка')) {
+            category = 'sites';
+        } else if (input.includes('smm') || input.includes('смм') || input.includes('инстаграм') || input.includes('продвижение') || input.includes('вип') || input.includes('пакет')) {
+            category = 'smm';
+        } else if (input.includes('таргет') || input.includes('meta') || input.includes('фейсбук') || input.includes('реклама') || input.includes('facebook')) {
+            category = 'ads_target';
+        } else if (input.includes('google') || input.includes('гугл') || input.includes('контекст') || input.includes('поиск')) {
+            category = 'ads_google';
+        } else if (input.includes('видео') || input.includes('ролик') || input.includes('съемка') || input.includes('съёмка') || input.includes('мобилограф') || input.includes('рилс') || input.includes('reels')) {
+            category = 'video';
+        } else if (input.includes('лого') || input.includes('бренд') || input.includes('стиль') || input.includes('айдентика') || input.includes('дизайн')) {
+            category = 'branding';
+        } else if (input.includes('печать') || input.includes('визитк') || input.includes('меню')) {
+            category = 'print';
+        } else if (input.includes('гарант') || input.includes('договор') || input.includes('оплата') || input.includes('ндс') || input.includes('результат')) {
+            category = 'guarantees';
+        }
 
         if (!category) return "";
 
+        console.log(`[RAG] 🔍 Попытка загрузки базы знаний для категории: ${category}`);
+
         try {
+            // Обращение к правильной таблице: kb_entries
             const { data, error } = await supabase
                 .from('kb_entries')
                 .select('content')
@@ -62,7 +75,16 @@ export const llm = {
                 .limit(1)
                 .maybeSingle();
 
-            if (error || !data) return "";
+            if (error) {
+                console.error(`[RAG] ❌ Ошибка Supabase:`, error.message);
+                return "";
+            }
+            if (!data) {
+                console.log(`[RAG] ⚠️ Категория ${category} не найдена в таблице kb_entries.`);
+                return "";
+            }
+
+            console.log(`[RAG] ✅ Загружена категория: ${category}`);
             return `\n\nИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ (КАТЕГОРИЯ ${category.toUpperCase()}):\n${data.content}`;
         } catch (err) {
             console.error('⚠️ Ошибка RAG:', err.message);
