@@ -94,39 +94,31 @@ export const llm = {
 
         try {
             if (model.startsWith('gemini-')) {
-                const geminiModel = googleAi.getGenerativeModel({ model: model });
-                
-                const result = await geminiModel.generateContent({
+                const result = await googleAi.models.generateContent({
+                    model: model,
                     contents: cleanMessages.map(m => ({
                         role: m.role === 'assistant' ? 'model' : 'user',
                         parts: [{ text: m.content }]
                     })),
-                    systemInstruction: fullSystemPrompt,
-                    generationConfig: {
+                    config: {
+                        systemInstruction: fullSystemPrompt,
                         temperature: 0.4,
                         topP: 0.95,
                         topK: 40,
                         maxOutputTokens: 4096,
-                    },
-                    safetySettings: [
-                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
-                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-                    ]
+                        safetySettings: [
+                            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+                            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+                            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+                        ]
+                    }
                 });
-
-                const response = await result.response;
-                responseText = response.text();
-                
-                const finishReason = response.candidates?.[0]?.finishReason;
-                console.log(`[Gemini] finishReason: ${finishReason}`);
-
-                usage = { 
-                    input_tokens: response.usageMetadata?.promptTokenCount || 0, 
-                    output_tokens: response.usageMetadata?.candidatesTokenCount || 0 
+                responseText = result.text;
+                usage = {
+                    input_tokens: result.usageMetadata?.promptTokenCount || 0,
+                    output_tokens: result.usageMetadata?.candidatesTokenCount || 0
                 };
-
             } else if (model.includes('claude')) {
                 const msg = await anthropic.messages.create({
                     model: model,
