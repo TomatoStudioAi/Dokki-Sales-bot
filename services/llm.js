@@ -4,7 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import { config } from '../config/env.js';
 import { calculateCost } from './cost-tracker.js';
-import { supabase } from './supabase.js';
+import { db } from './supabase.js'; // Импортируем объект db
 
 const openai = new OpenAI({ apiKey: config.ai.openaiKey });
 const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
@@ -43,7 +43,7 @@ export const llm = {
         const input = userInput.toLowerCase().trim();
         let category = null;
 
-        // Расширенные триггеры для всех категорий
+        // Расширенные триггеры
         if (input.includes('сайт') || input.includes('тильда') || input.includes('tilda') || input.includes('разработка')) {
             category = 'sites';
         } else if (input.includes('smm') || input.includes('смм') || input.includes('инстаграм') || input.includes('продвижение') || input.includes('вип') || input.includes('пакет')) {
@@ -67,8 +67,8 @@ export const llm = {
         console.log(`[RAG] 🔍 Попытка загрузки базы знаний для категории: ${category}`);
 
         try {
-            // Обращение к правильной таблице: kb_entries
-            const { data, error } = await supabase
+            // Используем db.supabase для прямого доступа к клиенту
+            const { data, error } = await db.supabase
                 .from('kb_entries')
                 .select('content')
                 .eq('category', category)
@@ -94,14 +94,6 @@ export const llm = {
 
     selectModel(text, messageCount, history) {
         const input = text.toLowerCase().trim();
-        
-        // ВРЕМЕННО: тест Gemini без Claude
-        /*
-        const isComplex = input.length > 100 || 
-            ['почему', 'как', 'сравни', 'объясни', 'договор', 'созвон'].some(w => input.includes(w));
-        if (isComplex || messageCount >= 5) return config.ai.models.closer;
-        */
-
         const isSimple = input.length < 15 ||
             ['привет', 'здравствуй', 'салем', 'хай'].some(w => input.includes(w));
 
