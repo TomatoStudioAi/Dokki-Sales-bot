@@ -122,7 +122,7 @@ export const llm = {
                         temperature: 0.4,
                         topP: 0.95,
                         topK: 40,
-                        maxOutputTokens: 2048,
+                        maxOutputTokens: 4096,
                         safetySettings: [
                             { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
                             { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
