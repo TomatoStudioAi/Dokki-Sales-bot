@@ -4,7 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import { config } from '../config/env.js';
 import { calculateCost } from './cost-tracker.js';
-import { db } from './supabase.js'; // Импортируем объект db
+import { db } from './supabase.js'; // Импорт объекта db, содержащего инстанс supabase
 
 const openai = new OpenAI({ apiKey: config.ai.openaiKey });
 const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
@@ -67,7 +67,7 @@ export const llm = {
         console.log(`[RAG] 🔍 Попытка загрузки базы знаний для категории: ${category}`);
 
         try {
-            // Используем db.supabase для прямого доступа к клиенту
+            // Используем db.supabase (как мы выяснили из grep)
             const { data, error } = await db.supabase
                 .from('kb_entries')
                 .select('content')
@@ -96,12 +96,10 @@ export const llm = {
         const input = text.toLowerCase().trim();
         const isSimple = input.length < 15 ||
             ['привет', 'здравствуй', 'салем', 'хай'].some(w => input.includes(w));
-
         return isSimple ? config.ai.models.filter : config.ai.models.expert;
     },
 
     async ask(model, systemPrompt, history, userMessage) {
-        // Подгружаем знания из базы перед запросом
         const extraKnowledge = await this.getRelevantKnowledge(userMessage);
         const fullSystemPrompt = systemPrompt + extraKnowledge;
 
@@ -135,6 +133,10 @@ export const llm = {
                 });
 
                 responseText = result.text;
+                
+                // Дебаг: логируем причину остановки Gemini
+                console.log(`[Gemini] finishReason: ${result.candidates?.[0]?.finishReason}`);
+
                 usage = { 
                     input_tokens: result.usageMetadata?.promptTokenCount || 0, 
                     output_tokens: result.usageMetadata?.candidatesTokenCount || 0 
