@@ -4,7 +4,7 @@ import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import { config } from '../config/env.js';
 import { calculateCost } from './cost-tracker.js';
-import { db } from './supabase.js'; // Импорт объекта db, содержащего инстанс supabase
+import { db } from './supabase.js';
 
 const openai = new OpenAI({ apiKey: config.ai.openaiKey });
 const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
@@ -38,54 +38,37 @@ export const llm = {
         return normalized;
     },
 
-    // RAG: Получение знаний по категории
+    // Мульти-RAG: Собирает все подходящие категории знаний
     async getRelevantKnowledge(userInput) {
         const input = userInput.toLowerCase().trim();
-        let category = null;
+        const foundCategories = new Set();
 
-        // Расширенные триггеры
-        if (input.includes('сайт') || input.includes('тильда') || input.includes('tilda') || input.includes('разработка')) {
-            category = 'sites';
-        } else if (input.includes('smm') || input.includes('смм') || input.includes('инстаграм') || input.includes('продвижение') || input.includes('вип') || input.includes('пакет')) {
-            category = 'smm';
-        } else if (input.includes('таргет') || input.includes('meta') || input.includes('фейсбук') || input.includes('реклама') || input.includes('facebook')) {
-            category = 'ads_target';
-        } else if (input.includes('google') || input.includes('гугл') || input.includes('контекст') || input.includes('поиск')) {
-            category = 'ads_google';
-        } else if (input.includes('видео') || input.includes('ролик') || input.includes('съемка') || input.includes('съёмка') || input.includes('мобилограф') || input.includes('рилс') || input.includes('reels')) {
-            category = 'video';
-        } else if (input.includes('лого') || input.includes('бренд') || input.includes('стиль') || input.includes('айдентика') || input.includes('дизайн')) {
-            category = 'branding';
-        } else if (input.includes('печать') || input.includes('визитк') || input.includes('меню')) {
-            category = 'print';
-        } else if (input.includes('гарант') || input.includes('договор') || input.includes('оплата') || input.includes('ндс') || input.includes('результат')) {
-            category = 'guarantees';
-        }
+        // Поиск всех совпадений
+        if (input.includes('сайт') || input.includes('тильда') || input.includes('tilda') || input.includes('разработка')) foundCategories.add('sites');
+        if (input.includes('smm') || input.includes('смм') || input.includes('инстаграм') || input.includes('продвижение') || input.includes('вип') || input.includes('пакет')) foundCategories.add('smm');
+        if (input.includes('таргет') || input.includes('meta') || input.includes('фейсбук') || input.includes('реклама') || input.includes('facebook')) foundCategories.add('ads_target');
+        if (input.includes('google') || input.includes('гугл') || input.includes('контекст') || input.includes('поиск')) foundCategories.add('ads_google');
+        if (input.includes('видео') || input.includes('ролик') || input.includes('съемка') || input.includes('съёмка') || input.includes('мобилограф') || input.includes('рилс') || input.includes('reels')) foundCategories.add('video');
+        if (input.includes('лого') || input.includes('бренд') || input.includes('стиль') || input.includes('айдентика') || input.includes('дизайн')) foundCategories.add('branding');
+        if (input.includes('печать') || input.includes('визитк') || input.includes('меню')) foundCategories.add('print');
+        if (input.includes('гарант') || input.includes('договор') || input.includes('оплата') || input.includes('ндс') || input.includes('результат')) foundCategories.add('guarantees');
 
-        if (!category) return "";
+        if (foundCategories.size === 0) return "";
 
-        console.log(`[RAG] 🔍 Попытка загрузки базы знаний для категории: ${category}`);
+        const categoriesArray = Array.from(foundCategories);
+        console.log(`[RAG] 🔍 Попытка загрузки категорий: ${categoriesArray.join(', ')}`);
 
         try {
-            // Используем db.supabase (как мы выяснили из grep)
             const { data, error } = await db.supabase
                 .from('kb_entries')
                 .select('content')
-                .eq('category', category)
-                .limit(1)
-                .maybeSingle();
+                .in('category', categoriesArray);
 
-            if (error) {
-                console.error(`[RAG] ❌ Ошибка Supabase:`, error.message);
-                return "";
-            }
-            if (!data) {
-                console.log(`[RAG] ⚠️ Категория ${category} не найдена в таблице kb_entries.`);
-                return "";
-            }
+            if (error || !data || data.length === 0) return "";
 
-            console.log(`[RAG] ✅ Загружена категория: ${category}`);
-            return `\n\nИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ (КАТЕГОРИЯ ${category.toUpperCase()}):\n${data.content}`;
+            console.log(`[RAG] ✅ Загружено блоков: ${data.length}`);
+            const combinedContent = data.map(item => item.content).join('\n\n---\n\n');
+            return `\n\nИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ:\n${combinedContent}`;
         } catch (err) {
             console.error('⚠️ Ошибка RAG:', err.message);
             return "";
@@ -111,35 +94,37 @@ export const llm = {
 
         try {
             if (model.startsWith('gemini-')) {
-                const result = await googleAi.models.generateContent({
-                    model: model,
+                const geminiModel = googleAi.getGenerativeModel({ model: model });
+                
+                const result = await geminiModel.generateContent({
                     contents: cleanMessages.map(m => ({
                         role: m.role === 'assistant' ? 'model' : 'user',
                         parts: [{ text: m.content }]
                     })),
-                    config: {
-                        systemInstruction: fullSystemPrompt,
+                    systemInstruction: fullSystemPrompt,
+                    generationConfig: {
                         temperature: 0.4,
                         topP: 0.95,
                         topK: 40,
                         maxOutputTokens: 4096,
-                        safetySettings: [
-                            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
-                            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-                        ]
-                    }
+                    },
+                    safetySettings: [
+                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
+                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+                    ]
                 });
 
-                responseText = result.text;
+                const response = await result.response;
+                responseText = response.text();
                 
-                // Дебаг: логируем причину остановки Gemini
-                console.log(`[Gemini] finishReason: ${result.candidates?.[0]?.finishReason}`);
+                const finishReason = response.candidates?.[0]?.finishReason;
+                console.log(`[Gemini] finishReason: ${finishReason}`);
 
                 usage = { 
-                    input_tokens: result.usageMetadata?.promptTokenCount || 0, 
-                    output_tokens: result.usageMetadata?.candidatesTokenCount || 0 
+                    input_tokens: response.usageMetadata?.promptTokenCount || 0, 
+                    output_tokens: response.usageMetadata?.candidatesTokenCount || 0 
                 };
 
             } else if (model.includes('claude')) {
