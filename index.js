@@ -67,6 +67,7 @@ bot.on('message', async (ctx) => {
 
             if (ctx.message.caption) {
                 messageText = ctx.message.caption;
+                await ctx.reply('Файл получили и передали менеджеру. Отвечаю на ваш вопрос:');
             } else {
                 await ctx.reply('Получили ваш файл и передали менеджеру. Он свяжется с вами в ближайшее время.');
                 return;
@@ -146,12 +147,12 @@ bot.on('message', async (ctx) => {
 
         // --- ОБНОВЛЕННАЯ ОЧИСТКА MARKDOWN ---
         const cleanText = replyText
-            .replace(/\*\*(.*?)\*\*/g, '$1')  // убрать жирный
-            .replace(/\*(.*?)\*/g, '$1')       // убрать курсив
-            .replace(/^[-•]\s/gm, '')          // убрать маркеры списка в начале строки
-            .replace(/^#{1,6}/gm, '')          // убрать # в начале строки без пробела
-            .replace(/#{1,6}\s/g, '')          // убрать заголовки с пробелом
-            .replace(/`(.*?)`/g, '$1');        // убрать код
+            .replace(/\*\*(.*?)\*\*/g, '$1')
+            .replace(/\*(.*?)\*/g, '$1')
+            .replace(/^[-•]\s/gm, '')
+            .replace(/^#{1,6}/gm, '')
+            .replace(/#{1,6}\s/g, '')
+            .replace(/`(.*?)`/g, '$1');
         
         await ctx.reply(cleanText);
 
