@@ -13,7 +13,6 @@ const PID = process.pid;
 
 let SYSTEM_PROMPT = null;
 
-// Инициализируем бота до Express, чтобы передать его в middleware
 const bot = new Telegraf(config.telegram.token);
 
 const app = express();
@@ -22,7 +21,6 @@ const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send(`Bot PID ${PID} is running`));
 app.get('/health', (req, res) => res.json({ status: 'ok', pid: PID, uptime: process.uptime() }));
 
-// Интеграция вебхука с Express
 app.use(bot.webhookCallback('/webhook'));
 
 const server = app.listen(PORT, () => {
@@ -58,22 +56,17 @@ bot.on('message', async (ctx) => {
 
     const userId = ctx.from.id;
 
-    // 1. Перехват файлов (фото, документы, видео, аудио)
+    // 1. Перехват файлов
     if (ctx.message?.document || ctx.message?.photo || ctx.message?.video || ctx.message?.audio) {
         try {
-            // Получаем топик клиента (если есть) или берем дефолтный
             const topic = await db.getTopic(userId);
             const topicId = topic ? topic.topic_id : config.telegram.alertsTopicId;
 
-            // Пересылаем файл в админ-группу
             await ctx.forwardMessage(adminGroupId, {
                 message_thread_id: topicId
             });
 
-            // Отвечаем клиенту
             await ctx.reply('Получили ваш файл и передали менеджеру. Он свяжется с вами в ближайшее время.');
-            
-            // Прерываем выполнение, чтобы файл не улетел в LLM
             return;
         } catch (error) {
             console.error(`[PID:${PID}] ❌ Ошибка при пересылке файла:`, error.message);
@@ -148,40 +141,35 @@ bot.on('message', async (ctx) => {
         const aiResult = await llm.ask(model, SYSTEM_PROMPT, history, messageText);
         
         const replyText = aiResult.text;
-        
-        console.log(`[PID:${PID}] 🔍 replyText type: ${typeof replyText}, value: "${replyText}"`);
-        
-        await ctx.reply(replyText);
 
-        // --- ИНТЕГРАЦИЯ: УВЕДОМЛЕНИЕ МЕНЕДЖЕРА ---
+        // --- БЛОК ОЧИСТКИ ТЕКСТА (RegEx) ---
+        const cleanText = replyText
+            .replace(/\*\*(.*?)\*\*/g, '$1')  // убрать жирный
+            .replace(/\*(.*?)\*/g, '$1')       // убрать курсив
+            .replace(/#{1,6}\s/g, '')          // убрать заголовки
+            .replace(/`(.*?)`/g, '$1');        // убрать код
+        
+        console.log(`[PID:${PID}] 🔍 Original length: ${replyText.length}, Cleaned length: ${cleanText.length}`);
+        
+        // Отвечаем очищенным текстом
+        await ctx.reply(cleanText);
+
         const managerTriggers = [
-            'переда',      // передал, передаю, передам
-            'менеджер',    // менеджер свяжется, менеджер ответит
-            'свяжет',      // свяжется, свяжет
-            'специалист',  // специалист свяжется
-            'заявк',       // заявка принята, заявку передал
-            'подключит',   // подключится человек
-            'перезвон',    // перезвоним, перезвонит
+            'переда', 'менеджер', 'свяжет', 'специалист', 'заявк', 'подключит', 'перезвон',
         ];
 
-        const lowerCaseReply = (replyText || "").toLowerCase();
+        const lowerCaseReply = cleanText.toLowerCase();
         const needsManager = managerTriggers.some(t => lowerCaseReply.includes(t));
-
-        console.log(`[PID:${PID}] 🔍 Manager check: topic=${config.telegram.alertsTopicId}, triggered=${needsManager}`);
 
         if (needsManager) {
             try {
                 const clientName = ctx.from?.first_name || 'Клиент';
                 const clientUsername = ctx.from?.username ? `@${ctx.from.username}` : 'Без юзернейма';
-                
                 const safeQuestion = typeof messageText === 'string' ? messageText : 'Вложение или медиа';
                 const questionSnippet = safeQuestion.slice(0, 100);
 
                 const cleanGroupId = String(config.telegram.adminGroupId).replace('-100', '');
-                const topicId = userTopic?.topic_id;
-                const clientTopicLink = topicId 
-                    ? `https://t.me/c/${cleanGroupId}/${topicId}`
-                    : 'Ссылка недоступна';
+                const clientTopicLink = `https://t.me/c/${cleanGroupId}/${userTopic.topic_id}`;
 
                 const alertHTML = `🔔 <b>ТРЕБУЕТСЯ МЕНЕДЖЕР</b>\n\n` +
                                   `👤 <b>Клиент:</b> ${clientName} (${clientUsername})\n` +
@@ -194,12 +182,11 @@ bot.on('message', async (ctx) => {
                     disable_web_page_preview: true
                 });
             } catch (err) {
-                console.error(`[PID:${PID}] ❌ Ошибка внутри блока алерта:`, err.message);
+                console.error(`[PID:${PID}] ❌ Ошибка алерта:`, err.message);
             }
         }
-        // ----------------------------------------
 
-        await ctx.telegram.sendMessage(adminGroupId, `🤖 <b>AI [${aiResult.model}]:</b> ${replyText}`, {
+        await ctx.telegram.sendMessage(adminGroupId, `🤖 <b>AI [${aiResult.model}]:</b> ${cleanText}`, {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'
         });
@@ -207,7 +194,7 @@ bot.on('message', async (ctx) => {
         await db.logMessage({
             user_id: userId,
             message_text: messageText,
-            bot_response: replyText,
+            bot_response: cleanText,
             model_used: aiResult.model,
             cost_usd: aiResult.cost
         });
@@ -223,22 +210,14 @@ const startBot = async () => {
         console.log(`[PID:${PID}] 📥 Загружаю SYSTEM_PROMPT из Supabase...`);
         SYSTEM_PROMPT = await db.getConfig('system_prompt');
 
-        if (!SYSTEM_PROMPT) {
-            throw new Error('Критическая ошибка: SYSTEM_PROMPT не найден!');
-        }
+        if (!SYSTEM_PROMPT) throw new Error('SYSTEM_PROMPT не найден!');
         
         console.log(`[PID:${PID}] ✅ Конфиг загружен. Длина промпта: ${SYSTEM_PROMPT.length} симв.`);
         
         const WEBHOOK_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN;
-        if (!WEBHOOK_DOMAIN) {
-            throw new Error('Критическая ошибка: RAILWAY_PUBLIC_DOMAIN не задан!');
-        }
-
         const webhookUrl = `https://${WEBHOOK_DOMAIN}/webhook`;
-        console.log(`[PID:${PID}] 🔄 Устанавливаю вебхук: ${webhookUrl}`);
         
         await bot.telegram.setWebhook(webhookUrl);
-        
         console.log(`[PID:${PID}] ✅ Бот успешно запущен на вебхуках`);
     } catch (err) {
         console.error(`[PID:${PID}] ❌ Ошибка запуска:`, err.message);
