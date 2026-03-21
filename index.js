@@ -10,11 +10,9 @@ import path from 'path';
 import { tmpdir } from 'os';
 
 const PID = process.pid;
-
 let SYSTEM_PROMPT = null;
 
 const bot = new Telegraf(config.telegram.token);
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -55,8 +53,9 @@ bot.on('message', async (ctx) => {
     }
 
     const userId = ctx.from.id;
+    let messageText = ctx.message?.text || null;
 
-    // 1. Перехват файлов
+    // --- 1. ПЕРЕХВАТ ФАЙЛОВ И ПОДПИСЕЙ ---
     if (ctx.message?.document || ctx.message?.photo || ctx.message?.video || ctx.message?.audio) {
         try {
             const topic = await db.getTopic(userId);
@@ -66,16 +65,19 @@ bot.on('message', async (ctx) => {
                 message_thread_id: topicId
             });
 
-            await ctx.reply('Получили ваш файл и передали менеджеру. Он свяжется с вами в ближайшее время.');
-            return;
+            if (ctx.message.caption) {
+                messageText = ctx.message.caption;
+            } else {
+                await ctx.reply('Получили ваш файл и передали менеджеру. Он свяжется с вами в ближайшее время.');
+                return;
+            }
         } catch (error) {
             console.error(`[PID:${PID}] ❌ Ошибка при пересылке файла:`, error.message);
-            return;
+            if (!ctx.message.caption) return;
         }
     }
 
-    let messageText = ctx.message?.text || null;
-
+    // --- 2. ОБРАБОТКА ГОЛОСОВЫХ ---
     if (ctx.message?.voice) {
         try {
             const fileLink = await ctx.telegram.getFileLink(ctx.message.voice.file_id);
@@ -142,22 +144,18 @@ bot.on('message', async (ctx) => {
         
         const replyText = aiResult.text;
 
-        // --- БЛОК ОЧИСТКИ ТЕКСТА (RegEx) ---
+        // --- ОБНОВЛЕННАЯ ОЧИСТКА MARKDOWN ---
         const cleanText = replyText
             .replace(/\*\*(.*?)\*\*/g, '$1')  // убрать жирный
             .replace(/\*(.*?)\*/g, '$1')       // убрать курсив
-            .replace(/#{1,6}\s/g, '')          // убрать заголовки
+            .replace(/^[-•]\s/gm, '')          // убрать маркеры списка в начале строки
+            .replace(/^#{1,6}/gm, '')          // убрать # в начале строки без пробела
+            .replace(/#{1,6}\s/g, '')          // убрать заголовки с пробелом
             .replace(/`(.*?)`/g, '$1');        // убрать код
         
-        console.log(`[PID:${PID}] 🔍 Original length: ${replyText.length}, Cleaned length: ${cleanText.length}`);
-        
-        // Отвечаем очищенным текстом
         await ctx.reply(cleanText);
 
-        const managerTriggers = [
-            'переда', 'менеджер', 'свяжет', 'специалист', 'заявк', 'подключит', 'перезвон',
-        ];
-
+        const managerTriggers = ['переда', 'менеджер', 'свяжет', 'специалист', 'заявк', 'подключит', 'перезвон'];
         const lowerCaseReply = cleanText.toLowerCase();
         const needsManager = managerTriggers.some(t => lowerCaseReply.includes(t));
 
@@ -165,15 +163,14 @@ bot.on('message', async (ctx) => {
             try {
                 const clientName = ctx.from?.first_name || 'Клиент';
                 const clientUsername = ctx.from?.username ? `@${ctx.from.username}` : 'Без юзернейма';
-                const safeQuestion = typeof messageText === 'string' ? messageText : 'Вложение или медиа';
-                const questionSnippet = safeQuestion.slice(0, 100);
+                const questionSnippet = messageText.slice(0, 100);
 
                 const cleanGroupId = String(config.telegram.adminGroupId).replace('-100', '');
                 const clientTopicLink = `https://t.me/c/${cleanGroupId}/${userTopic.topic_id}`;
 
                 const alertHTML = `🔔 <b>ТРЕБУЕТСЯ МЕНЕДЖЕР</b>\n\n` +
                                   `👤 <b>Клиент:</b> ${clientName} (${clientUsername})\n` +
-                                  `❓ <b>Вопрос:</b> ${questionSnippet}${safeQuestion.length > 100 ? '...' : ''}\n\n` +
+                                  `❓ <b>Вопрос:</b> ${questionSnippet}${messageText.length > 100 ? '...' : ''}\n\n` +
                                   `🔗 <a href="${clientTopicLink}">Перейти к диалогу</a>`;
 
                 await ctx.telegram.sendMessage(config.telegram.adminGroupId, alertHTML, {
@@ -207,25 +204,15 @@ bot.on('message', async (ctx) => {
 
 const startBot = async () => {
     try {
-        console.log(`[PID:${PID}] 📥 Загружаю SYSTEM_PROMPT из Supabase...`);
         SYSTEM_PROMPT = await db.getConfig('system_prompt');
-
         if (!SYSTEM_PROMPT) throw new Error('SYSTEM_PROMPT не найден!');
-        
-        console.log(`[PID:${PID}] ✅ Конфиг загружен. Длина промпта: ${SYSTEM_PROMPT.length} симв.`);
-        
         const WEBHOOK_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN;
-        const webhookUrl = `https://${WEBHOOK_DOMAIN}/webhook`;
-        
-        await bot.telegram.setWebhook(webhookUrl);
-        console.log(`[PID:${PID}] ✅ Бот успешно запущен на вебхуках`);
+        await bot.telegram.setWebhook(`https://${WEBHOOK_DOMAIN}/webhook`);
+        console.log(`[PID:${PID}] ✅ Бот запущен на ${WEBHOOK_DOMAIN}`);
     } catch (err) {
         console.error(`[PID:${PID}] ❌ Ошибка запуска:`, err.message);
         process.exit(1);
     }
 };
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 startBot();
