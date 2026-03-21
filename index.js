@@ -57,6 +57,30 @@ bot.on('message', async (ctx) => {
     }
 
     const userId = ctx.from.id;
+
+    // 1. Перехват файлов (фото, документы, видео, аудио)
+    if (ctx.message?.document || ctx.message?.photo || ctx.message?.video || ctx.message?.audio) {
+        try {
+            // Получаем топик клиента (если есть) или берем дефолтный
+            const topic = await db.getTopic(userId);
+            const topicId = topic ? topic.topic_id : config.telegram.alertsTopicId;
+
+            // Пересылаем файл в админ-группу
+            await ctx.forwardMessage(adminGroupId, {
+                message_thread_id: topicId
+            });
+
+            // Отвечаем клиенту
+            await ctx.reply('Получили ваш файл и передали менеджеру. Он свяжется с вами в ближайшее время.');
+            
+            // Прерываем выполнение, чтобы файл не улетел в LLM
+            return;
+        } catch (error) {
+            console.error(`[PID:${PID}] ❌ Ошибка при пересылке файла:`, error.message);
+            return;
+        }
+    }
+
     let messageText = ctx.message?.text || null;
 
     if (ctx.message?.voice) {
