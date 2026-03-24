@@ -29,6 +29,8 @@ bot.catch((err, ctx) => {
     console.error(`[PID:${PID}] 🚨 Глобальная ошибка Telegraf:`, err.message);
 });
 
+// --- КОМАНДЫ ---
+
 bot.command('reload', async (ctx) => {
     const adminGroupId = Number(config.telegram.adminGroupId);
     if (Number(ctx.chat.id) !== adminGroupId) return;
@@ -44,10 +46,41 @@ bot.command('reload', async (ctx) => {
     ctx.reply(`✅ Промпт обновлён! Новая длина: ${SYSTEM_PROMPT.length} симв.`);
 });
 
+/**
+ * Команда /start вынесена в отдельный обработчик ПЕРЕД bot.on('message').
+ * Это позволяет ей работать игнорируя admin_override, но не сбрасывая его.
+ */
+bot.command('start', async (ctx) => {
+    const userId = ctx.from.id;
+    console.log(`[PID:${PID}] 🚀 Принудительное приветствие /start для ${userId}`);
+
+    try {
+        let userTopic = await db.getTopic(userId);
+        if (!userTopic) {
+            const topicId = await topics.create(ctx, ctx.from.first_name, ctx.from.username);
+            userTopic = await db.createTopic({
+                user_id: userId,
+                topic_id: topicId,
+                username: ctx.from.username || 'n/a',
+                first_name: ctx.from.first_name
+            });
+        }
+        
+        // Отправляем приветствие клиенту в любом случае
+        await ctx.reply('Здравствуйте! Вас приветствует Tomato Studio. 🍅 Рады, что вы обратились к нам! Расскажите подробнее о вашем проекте: что именно вас интересует? Нам можно писать текстом или наговаривать голосовые сообщения — как удобнее.');
+        
+    } catch (e) {
+        console.error(`[PID:${PID}] ❌ Ошибка в команде /start:`, e.message);
+    }
+});
+
+// --- ОСНОВНОЙ ОБРАБОТЧИК ---
+
 bot.on('message', async (ctx) => {
     const chatId = Number(ctx.chat.id);
     const adminGroupId = Number(config.telegram.adminGroupId);
 
+    // Если пишет админ в админ-группе
     if (chatId === adminGroupId) {
         return await handleAdminReply(ctx);
     }
@@ -61,16 +94,18 @@ bot.on('message', async (ctx) => {
             const topic = await db.getTopic(userId);
             const topicId = topic ? topic.topic_id : config.telegram.alertsTopicId;
 
+            // Пересылаем медиа в топик админу
             await ctx.forwardMessage(adminGroupId, {
                 message_thread_id: topicId
             });
 
             if (ctx.message.caption) {
                 messageText = ctx.message.caption;
+                // Подтверждение клиенту, что файл принят, перед ответом AI
                 await ctx.reply('Файл получили и передали менеджеру. Отвечаю на ваш вопрос:');
             } else {
                 await ctx.reply('Получили ваш файл и передали менеджеру. Он свяжется с вами в ближайшее время.');
-                return;
+                return; // Выходим, если текста нет
             }
         } catch (error) {
             console.error(`[PID:${PID}] ❌ Ошибка при пересылке файла:`, error.message);
@@ -110,6 +145,7 @@ bot.on('message', async (ctx) => {
             });
         }
 
+        // Дублируем сообщение клиента в топик админа
         try {
             await ctx.telegram.sendMessage(adminGroupId, `👤 <b>${ctx.from.first_name}:</b> ${messageText}`, {
                 message_thread_id: userTopic.topic_id,
@@ -129,14 +165,15 @@ bot.on('message', async (ctx) => {
             }
         }
 
-        if (messageText === '/start') return;
-
+        // --- 3. ПРОВЕРКА ADMIN OVERRIDE (ПАУЗА AI) ---
         const OVERRIDE_TIMEOUT_MS = 10 * 60 * 1000;
         const overrideExpired = userTopic.admin_override_at && 
             (Date.now() - new Date(userTopic.admin_override_at).getTime()) > OVERRIDE_TIMEOUT_MS;
 
+        // Если админ перехватил диалог и время не вышло — AI молчит
         if (userTopic.admin_override && !overrideExpired) return;
 
+        // --- 4. ЗАПРОС К AI ---
         const fullHistory = await db.getHistory(userId);
         const history = fullHistory.slice(-6);
 
@@ -145,17 +182,18 @@ bot.on('message', async (ctx) => {
         
         const replyText = aiResult.text;
 
-        // --- ОБНОВЛЕННАЯ ОЧИСТКА MARKDOWN ---
+        // --- 5. ОЧИСТКА MARKDOWN ПЕРЕД ОТПРАВКОЙ ---
         const cleanText = replyText
-            .replace(/\*\*(.*?)\*\*/g, '$1')
-            .replace(/\*(.*?)\*/g, '$1')
-            .replace(/^[-•]\s/gm, '')
-            .replace(/^#{1,6}/gm, '')
-            .replace(/#{1,6}\s/g, '')
-            .replace(/`(.*?)`/g, '$1');
+            .replace(/\*\*(.*?)\*\*/g, '$1')  // жирный
+            .replace(/\*(.*?)\*/g, '$1')       // курсив
+            .replace(/^[-•]\s/gm, '')          // маркеры списка
+            .replace(/^#{1,6}/gm, '')          // заголовки без пробела
+            .replace(/#{1,6}\s/g, '')          // заголовки с пробелом
+            .replace(/`(.*?)`/g, '$1');        // код
         
         await ctx.reply(cleanText);
 
+        // --- 6. ПРОВЕРКА ТРИГГЕРОВ НА МЕНЕДЖЕРА ---
         const managerTriggers = ['переда', 'менеджер', 'свяжет', 'специалист', 'заявк', 'подключит', 'перезвон'];
         const lowerCaseReply = cleanText.toLowerCase();
         const needsManager = managerTriggers.some(t => lowerCaseReply.includes(t));
@@ -184,6 +222,7 @@ bot.on('message', async (ctx) => {
             }
         }
 
+        // Логирование ответа AI в админ-группу и базу
         await ctx.telegram.sendMessage(adminGroupId, `🤖 <b>AI [${aiResult.model}]:</b> ${cleanText}`, {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'
@@ -207,6 +246,7 @@ const startBot = async () => {
     try {
         SYSTEM_PROMPT = await db.getConfig('system_prompt');
         if (!SYSTEM_PROMPT) throw new Error('SYSTEM_PROMPT не найден!');
+        
         const WEBHOOK_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN;
         await bot.telegram.setWebhook(`https://${WEBHOOK_DOMAIN}/webhook`);
         console.log(`[PID:${PID}] ✅ Бот запущен на ${WEBHOOK_DOMAIN}`);
