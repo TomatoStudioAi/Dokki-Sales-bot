@@ -75,11 +75,30 @@ export const llm = {
         }
     },
 
+    /**
+     * Исправленный роутинг моделей (Greeting Guard)
+     */
     selectModel(text, messageCount, history) {
         const input = text.toLowerCase().trim();
-        const isSimple = input.length < 15 ||
-            ['привет', 'здравствуй', 'салем', 'хай'].some(w => input.includes(w));
-        return isSimple ? config.ai.models.filter : config.ai.models.expert;
+        const isShort = input.length < 20;
+        const isGreeting = ['привет', 'салем', 'здравствуй', 'хай', 'добрый день', 'вечер'].some(w => input.includes(w));
+
+        // 1. Фильтруем только реально короткие приветствия или "шум"
+        if (isShort && isGreeting) return config.ai.models.filter;
+        if (isShort) return config.ai.models.filter;
+
+        // 2. CLOSER: Клод на договора и созвоны
+        if (input.includes('договор') || input.includes('созвон') || input.includes('встреч') || input.includes('оплат') || input.includes('подписать')) {
+            return config.ai.models.closer;
+        }
+
+        // 3. EXPERT: Джемини на кейсы, цены и процессы
+        if (input.includes('кейс') || input.includes('портфолио') || input.includes('пример') || input.includes('цен') || input.includes('стоимост') || input.includes('бюджет') || input.includes('процесс')) {
+            return config.ai.models.expert;
+        }
+
+        // По умолчанию для всех длинных запросов
+        return config.ai.models.expert;
     },
 
     async ask(model, systemPrompt, history, userMessage) {
@@ -93,6 +112,7 @@ export const llm = {
         let usage = { input_tokens: 0, output_tokens: 0 };
 
         try {
+            // ВЕТКА GEMINI (Используем generateContent и правильный импорт)
             if (model.startsWith('gemini-')) {
                 const result = await googleAi.models.generateContent({
                     model: model,
@@ -119,7 +139,9 @@ export const llm = {
                     input_tokens: result.usageMetadata?.promptTokenCount || 0,
                     output_tokens: result.usageMetadata?.candidatesTokenCount || 0
                 };
-            } else if (model.includes('claude')) {
+            } 
+            // ВЕТКА CLAUDE
+            else if (model.includes('claude')) {
                 const msg = await anthropic.messages.create({
                     model: model,
                     max_tokens: config.ai.maxTokens || 1024,
@@ -129,8 +151,9 @@ export const llm = {
                 });
                 responseText = msg.content[0].text;
                 usage = { input_tokens: msg.usage.input_tokens, output_tokens: msg.usage.output_tokens };
-
-            } else {
+            } 
+            // ВЕТКА OPENAI (GPT-4o-mini)
+            else {
                 const res = await openai.chat.completions.create({
                     model: model,
                     messages: [{ role: 'system', content: fullSystemPrompt }, ...cleanMessages],
