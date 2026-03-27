@@ -11,11 +11,11 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
     "@google/genai": "^1.45.0",
-    "@supabase/supabase-js": "^2.39.7",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",
     "node-fetch": "^3.3.2",
     "openai": "^4.0.0",
+    "pg": "^8.20.0",
     "telegraf": "^4.16.3"
   }
 }

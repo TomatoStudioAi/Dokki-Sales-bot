@@ -1,7 +1,7 @@
 import express from 'express';
 import { Telegraf } from 'telegraf';
 import { config } from './config/env.js';
-import { db } from './services/supabase.js';
+import { db } from './services/database.js'; // Заменено с supabase.js
 import { llm } from './services/llm.js';
 import { topics } from './services/topics.js';
 import { handleAdminReply } from './handlers/admin.js';
@@ -47,8 +47,7 @@ bot.command('reload', async (ctx) => {
 });
 
 /**
- * Команда /start вынесена в отдельный обработчик ПЕРЕД bot.on('message').
- * Это позволяет ей работать игнорируя admin_override, но не сбрасывая его.
+ * Команда /start: Инициализация пользователя и топика
  */
 bot.command('start', async (ctx) => {
     const userId = ctx.from.id;
@@ -66,8 +65,7 @@ bot.command('start', async (ctx) => {
             });
         }
         
-        // Отправляем приветствие клиенту в любом случае
-        await ctx.reply('Здравствуйте! Вас приветствует Tomato Studio. 🍅 Рады, что вы обратились к нам! Расскажите подробнее о вашем проекте: что именно вас интересует? Нам можно писать текстом или наговаривать голосовые сообщения — как удобнее.');
+        await ctx.reply('Здравствуйте! Вас приветствует Dokki Business. 🍅 Рады, что вы обратились к нам! Расскажите подробнее о вашем проекте: что именно вас интересует? Нам можно писать текстом или наговаривать голосовые сообщения — как удобнее.');
         
     } catch (e) {
         console.error(`[PID:${PID}] ❌ Ошибка в команде /start:`, e.message);
@@ -94,18 +92,16 @@ bot.on('message', async (ctx) => {
             const topic = await db.getTopic(userId);
             const topicId = topic ? topic.topic_id : config.telegram.alertsTopicId;
 
-            // Пересылаем медиа в топик админу
             await ctx.forwardMessage(adminGroupId, {
                 message_thread_id: topicId
             });
 
             if (ctx.message.caption) {
                 messageText = ctx.message.caption;
-                // Подтверждение клиенту, что файл принят, перед ответом AI
                 await ctx.reply('Файл получили и передали менеджеру. Отвечаю на ваш вопрос:');
             } else {
                 await ctx.reply('Получили ваш файл и передали менеджеру. Он свяжется с вами в ближайшее время.');
-                return; // Выходим, если текста нет
+                return;
             }
         } catch (error) {
             console.error(`[PID:${PID}] ❌ Ошибка при пересылке файла:`, error.message);
@@ -170,13 +166,10 @@ bot.on('message', async (ctx) => {
         const overrideExpired = userTopic.admin_override_at && 
             (Date.now() - new Date(userTopic.admin_override_at).getTime()) > OVERRIDE_TIMEOUT_MS;
 
-        // Если админ перехватил диалог и время не вышло — AI молчит
         if (userTopic.admin_override && !overrideExpired) return;
 
         // --- 4. ЗАПРОС К AI ---
-        const fullHistory = await db.getHistory(userId);
-        const history = fullHistory.slice(-6);
-
+        const history = await db.getHistory(userId);
         const model = llm.selectModel(messageText, history.length / 2, history);
         const aiResult = await llm.ask(model, SYSTEM_PROMPT, history, messageText);
         
@@ -184,12 +177,12 @@ bot.on('message', async (ctx) => {
 
         // --- 5. ОЧИСТКА MARKDOWN ПЕРЕД ОТПРАВКОЙ ---
         const cleanText = replyText
-            .replace(/\*\*(.*?)\*\*/g, '$1')  // жирный
-            .replace(/\*(.*?)\*/g, '$1')       // курсив
-            .replace(/^[-•]\s/gm, '')          // маркеры списка
-            .replace(/^#{1,6}/gm, '')          // заголовки без пробела
-            .replace(/#{1,6}\s/g, '')          // заголовки с пробелом
-            .replace(/`(.*?)`/g, '$1');        // код
+            .replace(/\*\*(.*?)\*\*/g, '$1')
+            .replace(/\*(.*?)\*/g, '$1')
+            .replace(/^[-•]\s/gm, '')
+            .replace(/^#{1,6}/gm, '')
+            .replace(/#{1,6}\s/g, '')
+            .replace(/`(.*?)`/g, '$1');
         
         await ctx.reply(cleanText);
 
@@ -222,7 +215,7 @@ bot.on('message', async (ctx) => {
             }
         }
 
-        // Логирование ответа AI в админ-группу и базу
+        // Логирование
         await ctx.telegram.sendMessage(adminGroupId, `🤖 <b>AI [${aiResult.model}]:</b> ${cleanText}`, {
             message_thread_id: userTopic.topic_id,
             parse_mode: 'HTML'
@@ -244,12 +237,20 @@ bot.on('message', async (ctx) => {
 
 const startBot = async () => {
     try {
+        // Инициализация схем Postgres при запуске
+        await db.init();
+
         SYSTEM_PROMPT = await db.getConfig('system_prompt');
         if (!SYSTEM_PROMPT) throw new Error('SYSTEM_PROMPT не найден!');
         
         const WEBHOOK_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN;
-        await bot.telegram.setWebhook(`https://${WEBHOOK_DOMAIN}/webhook`);
-        console.log(`[PID:${PID}] ✅ Бот запущен на ${WEBHOOK_DOMAIN}`);
+        if (WEBHOOK_DOMAIN) {
+            await bot.telegram.setWebhook(`https://${WEBHOOK_DOMAIN}/webhook`);
+            console.log(`[PID:${PID}] ✅ Бот запущен на ${WEBHOOK_DOMAIN}`);
+        } else {
+            console.log(`[PID:${PID}] ⚠️ RAILWAY_PUBLIC_DOMAIN не найден, запуск в режиме polling...`);
+            await bot.launch();
+        }
     } catch (err) {
         console.error(`[PID:${PID}] ❌ Ошибка запуска:`, err.message);
         process.exit(1);

@@ -4,11 +4,11 @@ import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
 import { config } from '../config/env.js';
 import { calculateCost } from './cost-tracker.js';
-import { db } from './supabase.js';
+import { db } from './database.js'; // ИСПОЛЬЗУЕМ НОВЫЙ DATABASE.JS
 
 const openai = new OpenAI({ apiKey: config.ai.openaiKey });
 const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
-const googleAi = new GoogleGenAI({ apiKey: config.ai.googleApiKey });
+const googleAi = new GoogleGenAI(config.ai.googleApiKey); // Исправлена инициализация под стандарт SDK
 
 export const llm = {
     async transcribe(filePath) {
@@ -38,66 +38,59 @@ export const llm = {
         return normalized;
     },
 
-    // Мульти-RAG: Собирает все подходящие категории знаний
+    /**
+     * Мульти-RAG: Собирает знания из Postgres
+     */
     async getRelevantKnowledge(userInput) {
         const input = userInput.toLowerCase().trim();
         const foundCategories = new Set();
 
-        // Поиск всех совпадений
+        // Поиск категорий по ключевым словам
         if (input.includes('сайт') || input.includes('тильда') || input.includes('tilda') || input.includes('разработка')) foundCategories.add('sites');
-        if (input.includes('smm') || input.includes('смм') || input.includes('инстаграм') || input.includes('продвижение') || input.includes('вип') || input.includes('пакет')) foundCategories.add('smm');
-        if (input.includes('таргет') || input.includes('meta') || input.includes('фейсбук') || input.includes('реклама') || input.includes('facebook')) foundCategories.add('ads_target');
-        if (input.includes('google') || input.includes('гугл') || input.includes('контекст') || input.includes('поиск')) foundCategories.add('ads_google');
-        if (input.includes('видео') || input.includes('ролик') || input.includes('съемка') || input.includes('съёмка') || input.includes('мобилограф') || input.includes('рилс') || input.includes('reels')) foundCategories.add('video');
-        if (input.includes('лого') || input.includes('бренд') || input.includes('стиль') || input.includes('айдентика') || input.includes('дизайн')) foundCategories.add('branding');
+        if (input.includes('smm') || input.includes('смм') || input.includes('инстаграм') || input.includes('продвижение')) foundCategories.add('smm');
+        if (input.includes('таргет') || input.includes('meta') || input.includes('фейсбук') || input.includes('реклама')) foundCategories.add('ads_target');
+        if (input.includes('google') || input.includes('гугл') || input.includes('контекст')) foundCategories.add('ads_google');
+        if (input.includes('видео') || input.includes('ролик') || input.includes('съемка') || input.includes('рилс')) foundCategories.add('video');
+        if (input.includes('лого') || input.includes('бренд') || input.includes('стиль') || input.includes('дизайн')) foundCategories.add('branding');
         if (input.includes('печать') || input.includes('визитк') || input.includes('меню')) foundCategories.add('print');
-        if (input.includes('гарант') || input.includes('договор') || input.includes('оплата') || input.includes('ндс') || input.includes('результат')) foundCategories.add('guarantees');
+        if (input.includes('гарант') || input.includes('договор') || input.includes('оплата')) foundCategories.add('guarantees');
 
         if (foundCategories.size === 0) return "";
 
         const categoriesArray = Array.from(foundCategories);
-        console.log(`[RAG] 🔍 Попытка загрузки категорий: ${categoriesArray.join(', ')}`);
+        console.log(`[RAG] 🔍 Запрос в Postgres для: ${categoriesArray.join(', ')}`);
 
         try {
-            const { data, error } = await db.supabase
-                .from('kb_entries')
-                .select('content')
-                .in('category', categoriesArray);
+            // Переписано с Supabase на нативный SQL
+            const sql = 'SELECT content FROM kb_entries WHERE category = ANY($1)';
+            const data = await db.query(sql, [categoriesArray]);
 
-            if (error || !data || data.length === 0) return "";
+            if (!data || data.length === 0) return "";
 
             console.log(`[RAG] ✅ Загружено блоков: ${data.length}`);
             const combinedContent = data.map(item => item.content).join('\n\n---\n\n');
             return `\n\nИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ:\n${combinedContent}`;
         } catch (err) {
-            console.error('⚠️ Ошибка RAG:', err.message);
+            console.error('⚠️ Ошибка RAG (Postgres):', err.message);
             return "";
         }
     },
 
-    /**
-     * Исправленный роутинг моделей (Greeting Guard)
-     */
     selectModel(text, messageCount, history) {
         const input = text.toLowerCase().trim();
         const isShort = input.length < 20;
-        const isGreeting = ['привет', 'салем', 'здравствуй', 'хай', 'добрый день', 'вечер'].some(w => input.includes(w));
-
-        // 1. Фильтруем только реально короткие приветствия или "шум"
-        if (isShort && isGreeting) return config.ai.models.filter;
+        
+        // Роутинг моделей
         if (isShort) return config.ai.models.filter;
-
-        // 2. CLOSER: Клод на договора и созвоны
-        if (input.includes('договор') || input.includes('созвон') || input.includes('встреч') || input.includes('оплат') || input.includes('подписать')) {
+        
+        if (input.includes('договор') || input.includes('созвон') || input.includes('оплат')) {
             return config.ai.models.closer;
         }
 
-        // 3. EXPERT: Джемини на кейсы, цены и процессы
-        if (input.includes('кейс') || input.includes('портфолио') || input.includes('пример') || input.includes('цен') || input.includes('стоимост') || input.includes('бюджет') || input.includes('процесс')) {
+        if (input.includes('кейс') || input.includes('цен') || input.includes('процесс')) {
             return config.ai.models.expert;
         }
 
-        // По умолчанию для всех длинных запросов
         return config.ai.models.expert;
     },
 
@@ -112,35 +105,23 @@ export const llm = {
         let usage = { input_tokens: 0, output_tokens: 0 };
 
         try {
-            // ВЕТКА GEMINI (Используем generateContent и правильный импорт)
             if (model.startsWith('gemini-')) {
-                const result = await googleAi.models.generateContent({
-                    model: model,
+                const geminiModel = googleAi.getGenerativeModel({ model: model });
+                const result = await geminiModel.generateContent({
                     contents: cleanMessages.map(m => ({
                         role: m.role === 'assistant' ? 'model' : 'user',
                         parts: [{ text: m.content }]
                     })),
-                    config: {
-                        systemInstruction: fullSystemPrompt,
-                        temperature: 0.4,
-                        topP: 0.95,
-                        topK: 40,
-                        maxOutputTokens: 4096,
-                        safetySettings: [
-                            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_ONLY_HIGH' },
-                            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-                        ]
-                    }
+                    systemInstruction: fullSystemPrompt,
                 });
-                responseText = result.text;
+                
+                const response = await result.response;
+                responseText = response.text();
                 usage = {
-                    input_tokens: result.usageMetadata?.promptTokenCount || 0,
-                    output_tokens: result.usageMetadata?.candidatesTokenCount || 0
+                    input_tokens: response.usageMetadata?.promptTokenCount || 0,
+                    output_tokens: response.usageMetadata?.candidatesTokenCount || 0
                 };
             } 
-            // ВЕТКА CLAUDE
             else if (model.includes('claude')) {
                 const msg = await anthropic.messages.create({
                     model: model,
@@ -152,7 +133,6 @@ export const llm = {
                 responseText = msg.content[0].text;
                 usage = { input_tokens: msg.usage.input_tokens, output_tokens: msg.usage.output_tokens };
             } 
-            // ВЕТКА OPENAI (GPT-4o-mini)
             else {
                 const res = await openai.chat.completions.create({
                     model: model,
