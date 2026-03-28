@@ -3,19 +3,19 @@ import fs from 'fs';
 import { db } from './database.js';
 import { SALES_SERVICES_PROMPT } from '../prompts/sales-services.js';
 
-// Хелпер для логирования с меткой времени
-const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
+const log = (msg) => console.log(`[${new Date().toISOString()}] [LLM_SERVICE] ${msg}`);
 
-export const llm = {
+class LLMService {
     /**
-     * Инициализация клиента OpenAI (BYOK)
+     * Инициализация клиента OpenAI (BYOK - Bring Your Own Key)
      */
     _getClient(apiKey) {
+        if (!apiKey) throw new Error('API ключ OpenAI не предоставлен');
         return new OpenAI({ apiKey });
-    },
+    }
 
     /**
-     * Расшифровка голосовых (Whisper)
+     * Расшифровка голосовых сообщений (Whisper)
      */
     async transcribe(filePath, apiKey) {
         const openai = this._getClient(apiKey);
@@ -29,125 +29,121 @@ export const llm = {
             log(`❌ Ошибка Whisper: ${error.message}`);
             throw new Error('Не удалось расшифровать аудио. Пожалуйста, напишите текстом.');
         }
-    },
+    }
 
     /**
-     * Поиск по прайсу через PostgreSQL FTS
+     * Полнотекстовый поиск по прайсу (FTS) с привязкой к Bot ID
      */
-    async getRelevantKnowledge(userInput, language = 'russian') {
+    async getRelevantKnowledge(userInput, botId, language = 'russian') {
         try {
-            const countResult = await db.query('SELECT COUNT(*) as total FROM prices');
-            const total = countResult[0]?.total || 0;
-            
-            // Безопасная проверка количества позиций
-            if (Number(total) === 0) {
-                log('⚠️ [FTS] Прайс пустой');
+            // Проверяем наличие продуктов для конкретного бота
+            const countRes = await db.query('SELECT COUNT(*) as total FROM products WHERE bot_id = $1', [botId]);
+            if (parseInt(countRes[0].total) === 0) {
                 return "";
             }
 
             const searchTerms = userInput.trim();
+            // Поиск по вектору + ILIKE для коротких совпадений
             const sql = `
                 SELECT name, description, price, category
-                FROM prices
-                WHERE fts_index @@ websearch_to_tsquery($1, $2)
-                OR name ILIKE $3
-                OR description ILIKE $3
-                ORDER BY ts_rank(fts_index, websearch_to_tsquery($1, $2)) DESC
+                FROM products
+                WHERE bot_id = $1 AND (
+                    search_vector @@ websearch_to_tsquery($2, $3)
+                    OR name ILIKE $4
+                    OR description ILIKE $4
+                )
+                ORDER BY ts_rank(search_vector, websearch_to_tsquery($2, $3)) DESC
                 LIMIT 10
             `;
             
-            const data = await db.query(sql, [language, searchTerms, `%${searchTerms}%`]);
+            const data = await db.query(sql, [botId, language, searchTerms, `%${searchTerms}%`]);
 
             if (!data || data.length === 0) {
-                log(`⚠️ [FTS] Ничего не найдено для: "${searchTerms}"`);
                 return "";
             }
 
-            log(`✅ [FTS] Найдено позиций: ${data.length}`);
+            log(`✅ [FTS] Найдено позиций: ${data.length} для бота #${botId}`);
 
             return `\n\nАКТУАЛЬНЫЙ ПРАЙС-ЛИСТ И УСЛУГИ:\n` + data.map(item => 
-                `Услуга: ${item.name}\nЦена: ${item.price}\nОписание: ${item.description}`
+                `Услуга: ${item.name}\nЦена: ${item.price} руб.\nОписание: ${item.description || 'Нет описания'}`
             ).join('\n\n---\n\n');
         } catch (err) {
             log(`⚠️ Ошибка FTS: ${err.message}`);
             return ""; 
         }
-    },
+    }
 
     /**
-     * Подготовка системного промпта с подстановкой переменных
+     * Подготовка системного промпта
      */
     _prepareSystemPrompt(template, businessName, knowledge) {
         const baseTemplate = template || SALES_SERVICES_PROMPT;
-        const promptWithBusiness = baseTemplate.replace(/{{business_name}}/g, businessName);
+        const promptWithBusiness = baseTemplate.replace(/{{business_name}}/g, businessName || 'нашей компании');
         return `${promptWithBusiness}\n\n${knowledge}`;
-    },
+    }
 
     /**
-     * Логика выбора модели (Спецификация Dokki)
+     * Логика выбора модели (Dokki Spec)
+     * gpt-4o для сложных задач, gpt-4o-mini для простых
      */
     _needsAdvancedModel(userMessage, knowledge) {
-        // Если база знаний выдала много данных или запрос сложный
-        if (knowledge.length > 500) return true;
+        if (knowledge.length > 800) return true;
         
         const complexPatterns = [
-            /что лучше|сравни|порекоменду|чем отличается/i,
-            /подбери|помоги выбрать|какой вариант/i,
-            /сколько будет стоить|рассчитай|составь смету/i,
-            /анализ|преимущества|выгода/i
+            /сравни|порекомендуй|выбери|лучше/i,
+            /почему|как именно|анализ|преимущества/i,
+            /смета|расчет|стоимость за все/i
         ];
         
         return complexPatterns.some(pattern => pattern.test(userMessage));
-    },
+    }
 
     /**
-     * Определение готовности клиента к передаче менеджеру
+     * Определение готовности к передаче менеджеру
      */
     isReadyForManager(userMessage, aiResponse) {
         const clientReadyPatterns = [
-            /хочу купить|оформить заказ|давайте сделаем/i,
-            /когда можете начать|готов обсудить|свяжитесь со мной/i,
-            /напишите менеджер|позвоните|договор/i,
-            /давайте встретимся|готов заказать/i,
-            /как оплатить|где оплатить|реквизиты/i,
-            /отправьте счет|выставьте счет/i,
-            /хочу обсудить|нужна консультация менеджера/i
+            /хочу купить|заказать|оплата|куда платить/i,
+            /менеджер|человек|оператор|свяжитесь/i,
+            /договор|счет|реквизиты/i
         ];
 
         const botHandoffPatterns = [
             /передам.*менеджер/i,
             /свяжется с вами/i,
-            /обсудить детали/i,
-            /менеджер ответит/i
+            /обсудить детали/i
         ];
 
         return clientReadyPatterns.some(p => p.test(userMessage)) ||
                botHandoffPatterns.some(p => p.test(aiResponse));
-    },
+    }
 
     /**
-     * Основной метод запроса
+     * Основной метод генерации ответа
      */
     async ask(botConfig, history, userMessage) {
-        const { openai_key, business_name, system_prompt } = botConfig;
+        const { id, openai_key, business_name, system_prompt } = botConfig;
+        
+        // Динамический клиент (BYOK)
         const openai = this._getClient(openai_key);
 
-        const knowledge = await this.getRelevantKnowledge(userMessage);
+        // Получаем знания конкретно этого бота
+        const knowledge = await this.getRelevantKnowledge(userMessage, id);
         const fullSystemPrompt = this._prepareSystemPrompt(system_prompt, business_name, knowledge);
 
-        // Роутинг моделей строго по ТЗ Dokki
+        // Роутинг моделей
         const model = this._needsAdvancedModel(userMessage, knowledge)
-            ? "gpt-4.1-mini"  
-            : "gpt-4o-mini";  
+            ? "gpt-4o"  // Продвинутая модель
+            : "gpt-4o-mini"; // Стандартная быстрая модель
 
-        log(`[LLM] Запрос для "${business_name}". Модель: ${model}`);
+        log(`[LLM] Запрос бота #${id} (${business_name}). Модель: ${model}`);
 
         try {
             const res = await openai.chat.completions.create({
                 model: model,
                 messages: [
                     { role: 'system', content: fullSystemPrompt },
-                    ...history.slice(-10), // Лимит контекста для кэширования
+                    ...history, // История уже отфильтрована в хендлере
                     { role: 'user', content: userMessage }
                 ],
                 temperature: 0.7,
@@ -165,11 +161,12 @@ export const llm = {
         } catch (error) {
             log(`❌ Ошибка OpenAI (${model}): ${error.message}`);
             
-            if (error.status === 401) throw new Error('Ошибка: Неверный API ключ в настройках бота.');
-            if (error.status === 429) throw new Error('Ошибка: Лимит запросов исчерпан или недостаточно средств в OpenAI.');
-            if (error.status === 500) throw new Error('Ошибка: Сервис OpenAI временно недоступен.');
+            if (error.status === 401) throw new Error('Неверный API ключ OpenAI в настройках бота.');
+            if (error.status === 429) throw new Error('Лимит запросов OpenAI исчерпан.');
             
-            throw new Error('Извините, возникли технические сложности. Попробуйте написать позже.');
+            throw new Error('Сервис временно недоступен. Попробуйте позже.');
         }
     }
-};
+}
+
+export const llm = new LLMService();

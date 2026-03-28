@@ -5,134 +5,207 @@ class Database {
   constructor() {
     this.pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      max: 20,
+      max: 30, // Увеличили пул под нагрузку
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
+      ssl: { rejectUnauthorized: false }
     });
   }
 
   /**
-   * Инициализация всех таблиц и индексов
+   * Универсальный метод для выполнения запросов
+   */
+  async query(text, params) {
+    try {
+      const res = await this.pool.query(text, params);
+      return res.rows;
+    } catch (error) {
+      console.error(`[DB_QUERY_ERROR] ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Инициализация Production-структуры (Multi-bot)
    */
   async init() {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
 
-      // 1. Конфигурация (Промпты и настройки)
+      // 1. БОТЫ (Multi-tenant ядро)
       await client.query(`
-        CREATE TABLE IF NOT EXISTS bot_config (
-          key TEXT PRIMARY KEY,
-          value JSONB NOT NULL,
-          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-
-      // 2. Топики пользователей (Связь Юзер <-> Ветка в админке)
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS user_topics (
-          user_id BIGINT PRIMARY KEY,
-          topic_id INTEGER,
-          username TEXT,
-          first_name TEXT,
-          admin_override BOOLEAN DEFAULT FALSE,
-          admin_override_at TIMESTAMP WITH TIME ZONE,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-
-      // 3. Лог сообщений (Для истории и аналитики)
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS messages_log (
+        CREATE TABLE IF NOT EXISTS bots (
           id SERIAL PRIMARY KEY,
-          user_id BIGINT,
-          message_text TEXT,
-          bot_response TEXT,
-          model_used TEXT,
-          cost_usd NUMERIC(10, 6),
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          telegram_username TEXT UNIQUE NOT NULL,
+          openai_key TEXT NOT NULL,
+          business_name TEXT NOT NULL,
+          welcome_message TEXT,
+          system_prompt TEXT,
+          alerts_topic_id BIGINT,
+          owner_user_id BIGINT,
+          status TEXT DEFAULT 'active',
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
         );
       `);
 
-      // 4. ТОВАРЫ И УСЛУГИ С FTS (Полнотекстовый поиск)
+      // 2. ПРАЙС (Привязка к боту + SKU)
       await client.query(`
         CREATE TABLE IF NOT EXISTS products (
           id SERIAL PRIMARY KEY,
+          bot_id INTEGER REFERENCES bots(id) ON DELETE CASCADE,
+          sku TEXT NOT NULL,
           name TEXT NOT NULL,
           category TEXT,
           price NUMERIC(12, 2) DEFAULT 0,
           description TEXT,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-          search_vector tsvector GENERATED ALWAYS AS (
+          search_vector TSVECTOR GENERATED ALWAYS AS (
             setweight(to_tsvector('russian', coalesce(name, '')), 'A') ||
             setweight(to_tsvector('russian', coalesce(description, '')), 'B')
-          ) STORED
+          ) STORED,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          CONSTRAINT products_bot_sku_unique UNIQUE (bot_id, sku)
+        );
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS products_search_idx ON products USING GIN(search_vector);`);
+
+      // 3. ТОПИКИ (Связь юзеров с ветками в админ-группах конкретных ботов)
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS user_topics (
+          id SERIAL PRIMARY KEY,
+          bot_id INTEGER REFERENCES bots(id) ON DELETE CASCADE,
+          user_id BIGINT NOT NULL,
+          topic_id INTEGER,
+          username TEXT,
+          first_name TEXT,
+          admin_override BOOLEAN DEFAULT FALSE,
+          admin_override_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          CONSTRAINT user_topics_bot_user_unique UNIQUE (bot_id, user_id)
         );
       `);
 
-      // Индекс для мгновенного поиска по вектору
+      // 4. ДИАЛОГИ (Мета-данные сессий)
       await client.query(`
-        CREATE INDEX IF NOT EXISTS products_search_idx 
-        ON products USING GIN(search_vector);
+        CREATE TABLE IF NOT EXISTS conversations (
+          id SERIAL PRIMARY KEY,
+          bot_id INTEGER REFERENCES bots(id) ON DELETE CASCADE,
+          user_id BIGINT NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW(),
+          CONSTRAINT conversations_bot_user_unique UNIQUE (bot_id, user_id)
+        );
+      `);
+
+      // 5. СООБЩЕНИЯ (Нормализованная история)
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS messages (
+          id SERIAL PRIMARY KEY,
+          conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+          content TEXT NOT NULL,
+          model_used TEXT,
+          tokens_input INTEGER,
+          tokens_output INTEGER,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+      `);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at DESC);`);
+
+      // 6. БИЛЛИНГ И СТАТИСТИКА (Usage Logs)
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS usage_logs (
+          id SERIAL PRIMARY KEY,
+          bot_id INTEGER REFERENCES bots(id) ON DELETE CASCADE,
+          period DATE NOT NULL,
+          messages_count INTEGER DEFAULT 0,
+          tokens_input INTEGER DEFAULT 0,
+          tokens_output INTEGER DEFAULT 0,
+          cost_usd NUMERIC(10, 4) DEFAULT 0,
+          CONSTRAINT usage_unique UNIQUE (bot_id, period)
+        );
       `);
 
       await client.query('COMMIT');
-      console.log('✅ Postgres tables & FTS indexes initialized');
+      console.log('🚀 [DATABASE] Production schema initialized successfully');
 
       await this.ensureDefaults();
 
     } catch (e) {
       await client.query('ROLLBACK');
-      console.error('❌ DB Init Error:', e.message);
+      console.error('❌ [DATABASE] Init Critical Error:', e.message);
       throw e;
     } finally {
       client.release();
     }
   }
 
+  /**
+   * Гарантируем наличие хотя бы одного системного бота для тестов
+   */
   async ensureDefaults() {
     try {
-      const res = await this.pool.query('SELECT value FROM bot_config WHERE key = $1', ['system_prompt']);
-      if (!res.rows[0]) {
-        const defaultPrompt = `Ты — AI-ассистент Dokki Business. Помогай клиентам с выбором AI-решений.`;
-        await this.pool.query(
-          'INSERT INTO bot_config (key, value) VALUES ($1, $2)',
-          ['system_prompt', JSON.stringify(defaultPrompt)]
-        );
+      const res = await this.pool.query('SELECT COUNT(*) FROM bots');
+      if (res.rows[0].count === '0') {
+        const defaultPrompt = `Ты — AI-ассистент Dokki Business. Твоя цель — профессиональная консультация и продажи.`;
+        
+        await this.pool.query(`
+          INSERT INTO bots (telegram_username, openai_key, business_name, system_prompt) 
+          VALUES ($1, $2, $3, $4)
+        `, ['DokkiSystemBot', 'sk-placeholder', 'Dokki Business', defaultPrompt]);
+        
+        console.log('✅ [DATABASE] Default test bot created');
       }
     } catch (e) {
-      console.error('❌ ensureDefaults Error:', e.message);
+      console.error('❌ [DATABASE] ensureDefaults Error:', e.message);
     }
   }
 
-  // --- МЕТОДЫ ПОИСКА ПО ПРАЙСУ ---
-
-  async searchProducts(query, limit = 10) {
-    const sql = `
-      SELECT 
-        id, name, category, price, description,
-        ts_rank(search_vector, websearch_to_tsquery('russian', $1)) as rank
-      FROM products
-      WHERE search_vector @@ websearch_to_tsquery('russian', $1)
-      ORDER BY rank DESC
-      LIMIT $2
-    `;
-    const res = await this.pool.query(sql, [query, limit]);
-    return res.rows;
-  }
-
-  async insertProducts(productsArray) {
+  /**
+   * Логирование сообщения и обновление статистики (Атомарно)
+   */
+  async logInteraction(botId, userId, messageData, usageData) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      for (const p of productsArray) {
-        await client.query(
-          'INSERT INTO products (name, category, price, description) VALUES ($1, $2, $3, $4)',
-          [p.name, p.category, p.price, p.description || '']
+
+      // 1. Получаем ID диалога
+      let conv = await client.query(
+        'SELECT id FROM conversations WHERE bot_id = $1 AND user_id = $2',
+        [botId, userId]
+      );
+      
+      let conversationId;
+      if (!conv.rows[0]) {
+        const newConv = await client.query(
+          'INSERT INTO conversations (bot_id, user_id) VALUES ($1, $2) RETURNING id',
+          [botId, userId]
         );
+        conversationId = newConv.rows[0].id;
+      } else {
+        conversationId = conv.rows[0].id;
       }
+
+      // 2. Записываем сообщение
+      await client.query(
+        `INSERT INTO messages (conversation_id, role, content, model_used, tokens_input, tokens_output) 
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [conversationId, messageData.role, messageData.content, usageData.model, usageData.input, usageData.output]
+      );
+
+      // 3. Обновляем Usage Logs (UPSERT)
+      const period = new Date().toISOString().split('T')[0];
+      await client.query(`
+        INSERT INTO usage_logs (bot_id, period, messages_count, tokens_input, tokens_output)
+        VALUES ($1, $2, 1, $3, $4)
+        ON CONFLICT (bot_id, period) DO UPDATE
+        SET messages_count = usage_logs.messages_count + 1,
+            tokens_input = usage_logs.tokens_input + EXCLUDED.tokens_input,
+            tokens_output = usage_logs.tokens_output + EXCLUDED.tokens_output
+      `, [botId, period, usageData.input, usageData.output]);
+
       await client.query('COMMIT');
-      return true;
     } catch (e) {
       await client.query('ROLLBACK');
       throw e;
@@ -141,85 +214,20 @@ class Database {
     }
   }
 
-  async deleteAllProducts() {
-    await this.pool.query('DELETE FROM products');
-  }
-
-  async getProductsCount() {
-    const res = await this.pool.query('SELECT COUNT(*) FROM products');
-    return parseInt(res.rows[0].count, 10);
-  }
-
-  // --- МЕТОДЫ УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ ---
-
-  async getTopic(userId) {
-    const res = await this.pool.query('SELECT * FROM user_topics WHERE user_id = $1', [userId]);
-    return res.rows[0];
-  }
-
-  async createTopic(data) {
-    const res = await this.pool.query(
-      `INSERT INTO user_topics (user_id, topic_id, username, first_name) 
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [data.user_id, data.topic_id, data.username, data.first_name]
-    );
-    return res.rows[0];
-  }
-
-  async updateTopicId(userId, topicId) {
-    await this.pool.query('UPDATE user_topics SET topic_id = $2 WHERE user_id = $1', [userId, topicId]);
-  }
-
-  async setOverride(userId, value) {
-    const at = value ? new Date() : null;
-    await this.pool.query(
-      'UPDATE user_topics SET admin_override = $2, admin_override_at = $3 WHERE user_id = $1',
-      [userId, value, at]
-    );
-  }
-
-  async getUserIdByTopic(topicId) {
-    const res = await this.pool.query('SELECT user_id FROM user_topics WHERE topic_id = $1', [topicId]);
-    return res.rows[0]?.user_id;
-  }
-
-  // --- КОНФИГ И ЛОГИ ---
-
-  async getConfig(key) {
-    const res = await this.pool.query('SELECT value FROM bot_config WHERE key = $1', [key]);
-    return res.rows[0]?.value;
-  }
-
-  async setConfig(key, value) {
+  /**
+   * Получение истории для OpenAI (теперь из нормализованной таблицы)
+   */
+  async getChatHistory(botId, userId, limit = 15) {
     const sql = `
-      INSERT INTO bot_config (key, value) 
-      VALUES ($1, $2) 
-      ON CONFLICT (key) 
-      DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+      SELECT m.role, m.content 
+      FROM messages m
+      JOIN conversations c ON m.conversation_id = c.id
+      WHERE c.bot_id = $1 AND c.user_id = $2
+      ORDER BY m.created_at DESC
+      LIMIT $3
     `;
-    await this.pool.query(sql, [key, JSON.stringify(value)]);
-  }
-
-  async logMessage(log) {
-    await this.pool.query(
-      `INSERT INTO messages_log (user_id, message_text, bot_response, model_used, cost_usd) 
-       VALUES ($1, $2, $3, $4, $5)`,
-      [log.user_id, log.message_text, log.bot_response, log.model_used, log.cost_usd]
-    );
-  }
-
-  async getHistory(userId, limit = 10) {
-    const res = await this.pool.query(
-      `SELECT message_text, bot_response FROM messages_log 
-       WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`,
-      [userId, limit]
-    );
-    const history = [];
-    res.rows.reverse().forEach(row => {
-      history.push({ role: 'user', content: row.message_text });
-      history.push({ role: 'assistant', content: row.bot_response });
-    });
-    return history;
+    const res = await this.query(sql, [botId, userId, limit]);
+    return res.reverse(); // Возвращаем в хронологическом порядке
   }
 }
 

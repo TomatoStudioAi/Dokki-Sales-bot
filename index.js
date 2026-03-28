@@ -3,40 +3,33 @@ import express from 'express';
 import { db } from './services/database.js';
 import { handleMessage } from './handlers/message.js';
 import configRoutes from './routes/config.js';
+import pricesRoutes from './routes/prices.js';
 
 const log = (msg) => console.log(`[${new Date().toISOString()}] [SYSTEM] ${msg}`);
 
-// Используем точное имя из твоего Railway
+// Конфигурация из переменных окружения Railway
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const port = process.env.PORT || 3000;
 
 if (!token) {
-    log('❌ КРИТИЧЕСКАЯ ОШИБКА: TELEGRAM_BOT_TOKEN не найден в переменных окружения!');
+    log('❌ КРИТИЧЕСКАЯ ОШИБКА: TELEGRAM_BOT_TOKEN не найден!');
     process.exit(1);
 }
 
 const bot = new Telegraf(token);
 const app = express();
 
-const DEFAULT_WELCOME_TEMPLATE = `Здравствуйте! 👋
+const DEFAULT_WELCOME = `Здравствуйте! 👋\nЯ AI-консультант. Чем могу вам помочь?`;
 
-Я AI-консультант компании {{business_name}}.
-
-Помогу вам:
-✅ Подобрать подходящие услуги
-✅ Рассчитать стоимость
-✅ Ответить на вопросы
-
-Чем могу помочь?`;
-
-// Middleware
+// --- MIDDLEWARE & ROUTES ---
 app.use(express.json());
 
-// API Routes
+// API для настроек и прайса
 app.use('/api/config', configRoutes);
+app.use('/api/prices', pricesRoutes);
 
 /**
- * Health check с проверкой БД
+ * Health check: проверяет статус бота и доступность БД
  */
 app.get('/', async (req, res) => {
     try {
@@ -54,64 +47,72 @@ app.get('/', async (req, res) => {
 });
 
 /**
- * Обработка команды /start
+ * Обработка /start: берем данные из таблицы bots (Multi-bot logic)
  */
 bot.start(async (ctx) => {
     try {
-        const sql = `SELECT welcome_message, business_name FROM bot_config LIMIT 1`;
-        const result = await db.query(sql);
+        const botUsername = ctx.botInfo.username;
         
-        if (!result[0]) {
-            return ctx.reply('Здравствуйте! Чем могу помочь?');
+        // Ищем настройки конкретно для этого бота
+        const botData = await db.query(
+            'SELECT business_name, welcome_message FROM bots WHERE telegram_username = $1 OR id = 1 LIMIT 1',
+            [botUsername]
+        );
+
+        if (!botData[0]) {
+            log(`⚠️ Бот @${botUsername} не найден в таблице bots`);
+            return ctx.reply(DEFAULT_WELCOME);
         }
+
+        const { welcome_message, business_name } = botData[0];
+        const text = welcome_message || DEFAULT_WELCOME.replace('AI-консультант', `AI-консультант компании ${business_name}`);
         
-        const { welcome_message, business_name } = result[0];
-        const name = business_name || 'нашей компании';
-        
-        let welcomeText;
-        
-        if (welcome_message && welcome_message.trim().length > 0) {
-            welcomeText = welcome_message;
-        } else {
-            welcomeText = DEFAULT_WELCOME_TEMPLATE.replace(
-                /{{business_name}}/g, 
-                name
-            );
-        }
-        
-        return ctx.reply(welcomeText);
-        
+        return ctx.reply(text);
     } catch (error) {
         log(`❌ Ошибка /start: ${error.message}`);
-        return ctx.reply('Здравствуйте! Чем могу помочь?');
+        return ctx.reply(DEFAULT_WELCOME);
     }
 });
 
-// Основные обработчики
+/**
+ * Основной хендлер сообщений
+ */
 bot.on(['text', 'voice'], handleMessage);
 
-// Запуск приложения
+/**
+ * ЗАПУСК ПРИЛОЖЕНИЯ
+ */
 async function startApp() {
     try {
-        bot.launch();
-        log('✅ Telegraf бот запущен');
+        log('⏳ Инициализация базы данных...');
+        // Создает все таблицы (bots, products, messages, usage_logs) автоматически
+        await db.init();
+        log('✅ Структура БД проверена и готова');
 
+        // Запуск Telegram бота
+        const botInfo = await bot.telegram.getMe();
+        bot.launch();
+        log(`✅ Бот @${botInfo.username} запущен`);
+
+        // Запуск Express сервера для API (Flutter/Postman)
         app.listen(port, () => {
             log(`✅ Express сервер слушает порт ${port}`);
         });
+
     } catch (error) {
-        log(`❌ Ошибка запуска: ${error.message}`);
+        log(`❌ КРИТИЧЕСКАЯ ОШИБКА ЗАПУСКА: ${error.message}`);
+        process.exit(1);
     }
 }
 
 startApp();
 
-// Graceful shutdown
+// Graceful shutdown (корректное завершение)
 process.once('SIGINT', () => {
     bot.stop('SIGINT');
-    log('Бот остановлен (SIGINT)');
+    log('Process SIGINT: Бот остановлен');
 });
 process.once('SIGTERM', () => {
     bot.stop('SIGTERM');
-    log('Бот остановлен (SIGTERM)');
+    log('Process SIGTERM: Бот остановлен');
 });
