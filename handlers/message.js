@@ -118,73 +118,80 @@ export async function handleMessage(ctx) {
     if (!ctx.message?.text && !ctx.message?.voice) return;
     
     const userId = ctx.from.id;
-    const userMessage = ctx.message.text || '[Голосовое сообщение]';
+    const userText = ctx.message.text || '[Голосовое сообщение]';
     
-    // ДИНАМИЧЕСКОЕ ОПРЕДЕЛЕНИЕ БОТА (Уход от ID=1)
-    const botUsername = `@${ctx.botInfo.username}`;
+    // 1. ДИНАМИЧЕСКАЯ ИДЕНТИФИКАЦИЯ И НОРМАЛИЗАЦИЯ
+    const rawUsername = ctx.botInfo?.username;
+    
+    if (!rawUsername) {
+        log(`❌ Критично: ctx.botInfo.username отсутствует`);
+        return;
+    }
+
+    // Принудительно к нижнему регистру и добавляем @ для поиска
+    const botUsername = rawUsername.startsWith('@') 
+        ? rawUsername.toLowerCase() 
+        : `@${rawUsername.toLowerCase()}`;
+
+    log(`[SEARCH] Бот "${botUsername}" ищет настройки в БД...`);
 
     try {
-        // 1. Загружаем конфиг по telegram_username
-        const botData = await db.query(
-            'SELECT * FROM bots WHERE telegram_username = $1', 
+        // 2. БРОНЕБОЙНЫЙ ПОИСК (Игнорируем регистр и пробелы в базе)
+        const config = (await db.query(
+            `SELECT * FROM bots 
+             WHERE LOWER(TRIM(telegram_username)) = LOWER(TRIM($1))`,
             [botUsername]
-        );
-        const botConfig = botData[0];
+        ))[0];
 
-        if (!botConfig) {
-            log(`⚠️ Ошибка: Бот ${botUsername} не зарегистрирован в базе данных.`);
-            return; // Не отвечаем, если бот не в системе
+        if (!config) {
+            log(`⚠️ Бот ${botUsername} НЕ НАЙДЕН в БД. Проверь таблицу 'bots'.`);
+            // Не отвечаем ничего, чтобы не спамить, если бот не зарегистрирован
+            return; 
         }
 
-        if (!botConfig.openai_key) {
+        log(`✅ Найден конфиг для бота #${config.id} (${config.business_name})`);
+
+        if (!config.openai_key || config.openai_key === 'sk-placeholder') {
             log(`⚠️ Ошибка: У бота ${botUsername} не настроен OpenAI Key.`);
             return await ctx.reply('Бот временно недоступен. Пожалуйста, настройте API ключ.');
         }
 
-        // 2. Проверяем режим "Менеджер в чате"
-        if (await checkAdminOverride(botConfig.id, userId)) return;
+        // 3. Режим "Менеджер в чате"
+        if (await checkAdminOverride(config.id, userId)) return;
 
-        // 3. Обработка голоса
+        // 4. Обработка голоса
         if (ctx.message.voice) {
             return await ctx.reply("Я пока лучше понимаю текст. Пожалуйста, напишите ваше сообщение текстом.");
         }
 
-        // 4. Загружаем историю из нормализованной таблицы messages (используем botConfig.id)
-        const history = await db.getChatHistory(botConfig.id, userId, 15);
+        // 5. История и ИИ
+        const history = await db.getChatHistory(config.id, userId, 15);
+        const aiResult = await llm.ask(config, history, userText);
 
-        // 5. Запрос к ИИ (используем BYOK внутри llm.ask)
-        const result = await llm.ask(botConfig, history, userMessage);
-
-        // 6. Атомарное сохранение логов и статистики (User message)
-        await db.logInteraction(
-            botConfig.id, 
-            userId, 
-            { role: 'user', content: userMessage },
-            { model: result.model, input: result.tokens.input, output: 0 }
+        // 6. Атомарное логирование
+        await db.logInteraction(config.id, userId, 
+            { role: 'user', content: userText },
+            { model: aiResult.model, input: aiResult.tokens.input, output: 0 }
         );
 
-        // 7. Сохранение ответа ИИ (Assistant message)
-        await db.logInteraction(
-            botConfig.id, 
-            userId, 
-            { role: 'assistant', content: result.text },
-            { model: result.model, input: 0, output: result.tokens.output }
+        await db.logInteraction(config.id, userId,
+            { role: 'assistant', content: aiResult.text },
+            { model: aiResult.model, input: 0, output: aiResult.tokens.output }
         );
 
-        // 8. Проверка на готовность к продаже (Алерты)
-        if (llm.isReadyForManager(userMessage, result.text)) {
-            await sendManagerAlert(ctx, botConfig);
+        // 7. Проверка на Лид
+        if (llm.isReadyForManager(userText, aiResult.text)) {
+            await sendManagerAlert(ctx, config);
         }
 
-        // 9. Ответ пользователю
-        await ctx.reply(result.text);
+        await ctx.reply(aiResult.text);
 
     } catch (error) {
-        log(`❌ Ошибка обработки @${ctx.botInfo.username}: ${error.message}`);
+        log(`❌ Ошибка обработки для @${rawUsername}: ${error.message}`);
         
         const errorMessage = error.message.includes('API ключ') 
             ? error.message 
-            : 'Извините, возникла техническая проблема. Попробуйте позже.';
+            : 'Извините, возникла техническая сложность. Попробуйте позже.';
         
         await ctx.reply(errorMessage);
     }
