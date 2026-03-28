@@ -8,7 +8,14 @@ import { db } from '../services/database.js';
 
 const router = express.Router();
 
-// --- ХЕЛПЕРЫ ВАЛИДАЦИИ ---
+// --- ХЕЛПЕРЫ ВАЛИДАЦИИ И НОРМАЛИЗАЦИИ ---
+
+const normalizeUsername = (username) => {
+    if (!username) return null;
+    const clean = username.trim().toLowerCase();
+    return clean.startsWith('@') ? clean : `@${clean}`;
+};
+
 const validateConfig = (data) => {
     const errors = [];
     if (data.welcome_message && data.welcome_message.length > 500) {
@@ -24,12 +31,87 @@ const validateConfig = (data) => {
 };
 
 /**
- * 1. GET /api/config/:username
- * Получение полной конфигурации конкретного бота
+ * 1. POST /api/config
+ * Регистрация нового бота или полное обновление настроек (UPSERT)
+ * Используется Flutter-приложением при первом добавлении бота.
+ */
+router.post('/', async (req, res) => {
+    const { 
+        telegram_username, 
+        openai_key, 
+        business_name, 
+        system_prompt, 
+        welcome_message,
+        alerts_topic_id 
+    } = req.body;
+
+    // Обязательные поля для создания
+    if (!telegram_username || !openai_key || !business_name) {
+        return res.status(400).json({ 
+            error: 'Поля telegram_username, openai_key и business_name обязательны' 
+        });
+    }
+
+    const formattedUsername = normalizeUsername(telegram_username);
+    const validationErrors = validateConfig(req.body);
+    
+    if (validationErrors.length > 0) {
+        return res.status(400).json({ errors: validationErrors });
+    }
+
+    try {
+        console.log(`[API POST] Регистрация/Обновление бота: ${formattedUsername}`);
+
+        // SQL логика: Вставить новую запись, а если такой юзернейм уже есть — обновить данные (UPSERT)
+        const sql = `
+            INSERT INTO bots (
+                telegram_username, 
+                openai_key, 
+                business_name, 
+                system_prompt, 
+                welcome_message,
+                alerts_topic_id,
+                updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT (telegram_username) 
+            DO UPDATE SET 
+                openai_key = EXCLUDED.openai_key,
+                business_name = EXCLUDED.business_name,
+                system_prompt = COALESCE(EXCLUDED.system_prompt, bots.system_prompt),
+                welcome_message = COALESCE(EXCLUDED.welcome_message, bots.welcome_message),
+                alerts_topic_id = COALESCE(EXCLUDED.alerts_topic_id, bots.alerts_topic_id),
+                updated_at = NOW()
+            RETURNING id, telegram_username, business_name;
+        `;
+
+        const result = await db.query(sql, [
+            formattedUsername,
+            openai_key,
+            business_name.trim(),
+            system_prompt?.trim() || null,
+            welcome_message?.trim() || null,
+            alerts_topic_id || null
+        ]);
+
+        console.log(`✅ [API POST] Бот успешно сохранен (ID: ${result[0].id})`);
+        
+        res.json({
+            success: true,
+            bot: result[0]
+        });
+    } catch (error) {
+        console.error(`❌ [API POST ERROR] для ${formattedUsername}:`, error.message);
+        res.status(500).json({ error: 'Ошибка при сохранении конфигурации в базу' });
+    }
+});
+
+/**
+ * 2. GET /api/config/:username
+ * Получение текущих настроек конкретного бота
  */
 router.get('/:username', async (req, res) => {
-    const { username } = req.params;
-    const formattedUsername = username.startsWith('@') ? username : `@${username}`;
+    const formattedUsername = normalizeUsername(req.params.username);
 
     try {
         const sql = `
@@ -40,7 +122,8 @@ router.get('/:username', async (req, res) => {
                 welcome_message, 
                 system_prompt, 
                 alerts_topic_id,
-                status
+                status,
+                openai_key -- Передаем во Flutter только если нужно редактировать
             FROM bots 
             WHERE telegram_username = $1
         `;
@@ -49,35 +132,31 @@ router.get('/:username', async (req, res) => {
         
         if (!result[0]) {
             return res.status(404).json({ 
-                error: 'Бот с таким username не зарегистрирован в системе' 
+                error: 'Бот не зарегистрирован. Используйте POST для создания.' 
             });
         }
         
         res.json(result[0]);
     } catch (error) {
-        console.error(`[API GET CONFIG] Ошибка для ${formattedUsername}:`, error.message);
+        console.error(`[API GET CONFIG ERROR] для ${formattedUsername}:`, error.message);
         res.status(500).json({ error: 'Ошибка сервера при получении данных' });
     }
 });
 
 /**
- * 2. PATCH /api/config/:username
- * Универсальное обновление настроек (Приветствие, Промпт, Имя бизнеса)
- * Используем PATCH и COALESCE для частичного обновления данных из Flutter
+ * 3. PATCH /api/config/:username
+ * Частичное обновление настроек из Flutter (например, только приветствие)
  */
 router.patch('/:username', async (req, res) => {
-    const { username } = req.params;
-    const formattedUsername = username.startsWith('@') ? username : `@${username}`;
-    const { welcome_message, system_prompt, business_name, alerts_topic_id } = req.body;
+    const formattedUsername = normalizeUsername(req.params.username);
+    const { welcome_message, system_prompt, business_name, alerts_topic_id, openai_key } = req.body;
 
-    // Валидация входных данных
     const validationErrors = validateConfig(req.body);
     if (validationErrors.length > 0) {
         return res.status(400).json({ errors: validationErrors });
     }
 
     try {
-        // COALESCE позволяет обновить только те поля, которые прислал Flutter, сохранив остальные
         const sql = `
             UPDATE bots 
             SET 
@@ -85,8 +164,9 @@ router.patch('/:username', async (req, res) => {
                 system_prompt = COALESCE($2, system_prompt),
                 business_name = COALESCE($3, business_name),
                 alerts_topic_id = COALESCE($4, alerts_topic_id),
+                openai_key = COALESCE($5, openai_key),
                 updated_at = NOW()
-            WHERE telegram_username = $5
+            WHERE telegram_username = $6
             RETURNING id, telegram_username, business_name, updated_at
         `;
         
@@ -95,33 +175,32 @@ router.patch('/:username', async (req, res) => {
             system_prompt?.trim() || null,
             business_name?.trim() || null,
             alerts_topic_id || null,
+            openai_key || null,
             formattedUsername
         ];
 
         const result = await db.query(sql, params);
         
         if (result.length === 0) {
-            return res.status(404).json({ error: 'Бот не найден. Сначала создайте запись в БД.' });
+            return res.status(404).json({ error: 'Бот не найден' });
         }
         
         res.json({
             success: true,
-            message: 'Конфигурация успешно обновлена',
             updated: result[0]
         });
     } catch (error) {
-        console.error(`[API PATCH CONFIG] Ошибка для ${formattedUsername}:`, error.message);
+        console.error(`[API PATCH ERROR] для ${formattedUsername}:`, error.message);
         res.status(500).json({ error: 'Ошибка сервера при сохранении настроек' });
     }
 });
 
 /**
- * 3. DELETE /api/config/:username
- * Удаление бота из системы (например, при отписке клиента)
+ * 4. DELETE /api/config/:username
+ * Удаление бота
  */
 router.delete('/:username', async (req, res) => {
-    const { username } = req.params;
-    const formattedUsername = username.startsWith('@') ? username : `@${username}`;
+    const formattedUsername = normalizeUsername(req.params.username);
 
     try {
         const result = await db.query(
@@ -133,7 +212,8 @@ router.delete('/:username', async (req, res) => {
             return res.status(404).json({ error: 'Бот не найден' });
         }
         
-        res.json({ success: true, message: `Бот ${formattedUsername} удален из системы` });
+        console.log(`🗑 [API DELETE] Бот ${formattedUsername} удален`);
+        res.json({ success: true, message: `Бот ${formattedUsername} удален` });
     } catch (error) {
         res.status(500).json({ error: 'Ошибка при удалении' });
     }
