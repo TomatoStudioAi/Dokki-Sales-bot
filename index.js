@@ -4,16 +4,14 @@ import { db } from './services/database.js';
 import { handleMessage } from './handlers/message.js';
 import configRoutes from './routes/config.js';
 
-// TODO: Импортировать после создания handlers/admin.js
-// import { handleAdminOverride } from './handlers/admin.js';
-
 const log = (msg) => console.log(`[${new Date().toISOString()}] [SYSTEM] ${msg}`);
 
-const token = process.env.BOT_TOKEN;
+// Используем точное имя из твоего Railway
+const token = process.env.TELEGRAM_BOT_TOKEN;
 const port = process.env.PORT || 3000;
 
 if (!token) {
-    log('❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не найден в переменных окружения!');
+    log('❌ КРИТИЧЕСКАЯ ОШИБКА: TELEGRAM_BOT_TOKEN не найден в переменных окружения!');
     process.exit(1);
 }
 
