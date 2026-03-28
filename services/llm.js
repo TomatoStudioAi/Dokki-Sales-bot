@@ -1,17 +1,24 @@
 import OpenAI from 'openai';
-import Anthropic from '@anthropic-ai/sdk';
-import { GoogleGenAI } from '@google/genai';
 import fs from 'fs';
-import { config } from '../config/env.js';
-import { calculateCost } from './cost-tracker.js';
-import { db } from './database.js'; // ИСПОЛЬЗУЕМ НОВЫЙ DATABASE.JS
+import { db } from './database.js';
+import { SALES_SERVICES_PROMPT } from '../prompts/sales-services.js';
 
-const openai = new OpenAI({ apiKey: config.ai.openaiKey });
-const anthropic = new Anthropic({ apiKey: config.ai.anthropicKey });
-const googleAi = new GoogleGenAI(config.ai.googleApiKey); // Исправлена инициализация под стандарт SDK
+// Хелпер для логирования с меткой времени
+const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
 
 export const llm = {
-    async transcribe(filePath) {
+    /**
+     * Инициализация клиента OpenAI (BYOK)
+     */
+    _getClient(apiKey) {
+        return new OpenAI({ apiKey });
+    },
+
+    /**
+     * Расшифровка голосовых (Whisper)
+     */
+    async transcribe(filePath, apiKey) {
+        const openai = this._getClient(apiKey);
         try {
             const transcription = await openai.audio.transcriptions.create({
                 file: fs.createReadStream(filePath),
@@ -19,136 +26,150 @@ export const llm = {
             });
             return transcription.text;
         } catch (error) {
-            console.error('❌ Ошибка Whisper:', error.message);
-            throw new Error('Не удалось расшифровать аудио');
+            log(`❌ Ошибка Whisper: ${error.message}`);
+            throw new Error('Не удалось расшифровать аудио. Пожалуйста, напишите текстом.');
         }
-    },
-
-    _normalizeMessages(messages) {
-        if (messages.length === 0) return [];
-        const normalized = [];
-        for (const msg of messages) {
-            const last = normalized[normalized.length - 1];
-            if (last && last.role === msg.role) {
-                last.content += `\n\n${msg.content}`;
-            } else {
-                normalized.push({ ...msg });
-            }
-        }
-        return normalized;
     },
 
     /**
-     * Мульти-RAG: Собирает знания из Postgres
+     * Поиск по прайсу через PostgreSQL FTS
      */
-    async getRelevantKnowledge(userInput) {
-        const input = userInput.toLowerCase().trim();
-        const foundCategories = new Set();
-
-        // Поиск категорий по ключевым словам
-        if (input.includes('сайт') || input.includes('тильда') || input.includes('tilda') || input.includes('разработка')) foundCategories.add('sites');
-        if (input.includes('smm') || input.includes('смм') || input.includes('инстаграм') || input.includes('продвижение')) foundCategories.add('smm');
-        if (input.includes('таргет') || input.includes('meta') || input.includes('фейсбук') || input.includes('реклама')) foundCategories.add('ads_target');
-        if (input.includes('google') || input.includes('гугл') || input.includes('контекст')) foundCategories.add('ads_google');
-        if (input.includes('видео') || input.includes('ролик') || input.includes('съемка') || input.includes('рилс')) foundCategories.add('video');
-        if (input.includes('лого') || input.includes('бренд') || input.includes('стиль') || input.includes('дизайн')) foundCategories.add('branding');
-        if (input.includes('печать') || input.includes('визитк') || input.includes('меню')) foundCategories.add('print');
-        if (input.includes('гарант') || input.includes('договор') || input.includes('оплата')) foundCategories.add('guarantees');
-
-        if (foundCategories.size === 0) return "";
-
-        const categoriesArray = Array.from(foundCategories);
-        console.log(`[RAG] 🔍 Запрос в Postgres для: ${categoriesArray.join(', ')}`);
-
+    async getRelevantKnowledge(userInput, language = 'russian') {
         try {
-            // Переписано с Supabase на нативный SQL
-            const sql = 'SELECT content FROM kb_entries WHERE category = ANY($1)';
-            const data = await db.query(sql, [categoriesArray]);
-
-            if (!data || data.length === 0) return "";
-
-            console.log(`[RAG] ✅ Загружено блоков: ${data.length}`);
-            const combinedContent = data.map(item => item.content).join('\n\n---\n\n');
-            return `\n\nИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ:\n${combinedContent}`;
-        } catch (err) {
-            console.error('⚠️ Ошибка RAG (Postgres):', err.message);
-            return "";
-        }
-    },
-
-    selectModel(text, messageCount, history) {
-        const input = text.toLowerCase().trim();
-        const isShort = input.length < 20;
-        
-        // Роутинг моделей
-        if (isShort) return config.ai.models.filter;
-        
-        if (input.includes('договор') || input.includes('созвон') || input.includes('оплат')) {
-            return config.ai.models.closer;
-        }
-
-        if (input.includes('кейс') || input.includes('цен') || input.includes('процесс')) {
-            return config.ai.models.expert;
-        }
-
-        return config.ai.models.expert;
-    },
-
-    async ask(model, systemPrompt, history, userMessage) {
-        const extraKnowledge = await this.getRelevantKnowledge(userMessage);
-        const fullSystemPrompt = systemPrompt + extraKnowledge;
-
-        const rawMessages = [...history, { role: 'user', content: userMessage }];
-        const cleanMessages = this._normalizeMessages(rawMessages);
-
-        let responseText = '';
-        let usage = { input_tokens: 0, output_tokens: 0 };
-
-        try {
-            if (model.startsWith('gemini-')) {
-                const geminiModel = googleAi.getGenerativeModel({ model: model });
-                const result = await geminiModel.generateContent({
-                    contents: cleanMessages.map(m => ({
-                        role: m.role === 'assistant' ? 'model' : 'user',
-                        parts: [{ text: m.content }]
-                    })),
-                    systemInstruction: fullSystemPrompt,
-                });
-                
-                const response = await result.response;
-                responseText = response.text();
-                usage = {
-                    input_tokens: response.usageMetadata?.promptTokenCount || 0,
-                    output_tokens: response.usageMetadata?.candidatesTokenCount || 0
-                };
-            } 
-            else if (model.includes('claude')) {
-                const msg = await anthropic.messages.create({
-                    model: model,
-                    max_tokens: config.ai.maxTokens || 1024,
-                    temperature: config.ai.temperature || 0.7,
-                    system: fullSystemPrompt,
-                    messages: cleanMessages
-                });
-                responseText = msg.content[0].text;
-                usage = { input_tokens: msg.usage.input_tokens, output_tokens: msg.usage.output_tokens };
-            } 
-            else {
-                const res = await openai.chat.completions.create({
-                    model: model,
-                    messages: [{ role: 'system', content: fullSystemPrompt }, ...cleanMessages],
-                    temperature: config.ai.temperature || 0.7,
-                });
-                responseText = res.choices[0].message.content;
-                usage = { input_tokens: res.usage.prompt_tokens, output_tokens: res.usage.completion_tokens };
+            const countResult = await db.query('SELECT COUNT(*) as total FROM prices');
+            const total = countResult[0]?.total || 0;
+            
+            // Безопасная проверка количества позиций
+            if (Number(total) === 0) {
+                log('⚠️ [FTS] Прайс пустой');
+                return "";
             }
 
-            const cost = calculateCost(model, usage.input_tokens, usage.output_tokens);
-            return { text: responseText, model, cost, tokens: usage };
+            const searchTerms = userInput.trim();
+            const sql = `
+                SELECT name, description, price, category
+                FROM prices
+                WHERE fts_index @@ websearch_to_tsquery($1, $2)
+                OR name ILIKE $3
+                OR description ILIKE $3
+                ORDER BY ts_rank(fts_index, websearch_to_tsquery($1, $2)) DESC
+                LIMIT 10
+            `;
+            
+            const data = await db.query(sql, [language, searchTerms, `%${searchTerms}%`]);
+
+            if (!data || data.length === 0) {
+                log(`⚠️ [FTS] Ничего не найдено для: "${searchTerms}"`);
+                return "";
+            }
+
+            log(`✅ [FTS] Найдено позиций: ${data.length}`);
+
+            return `\n\nАКТУАЛЬНЫЙ ПРАЙС-ЛИСТ И УСЛУГИ:\n` + data.map(item => 
+                `Услуга: ${item.name}\nЦена: ${item.price}\nОписание: ${item.description}`
+            ).join('\n\n---\n\n');
+        } catch (err) {
+            log(`⚠️ Ошибка FTS: ${err.message}`);
+            return ""; 
+        }
+    },
+
+    /**
+     * Подготовка системного промпта с подстановкой переменных
+     */
+    _prepareSystemPrompt(template, businessName, knowledge) {
+        const baseTemplate = template || SALES_SERVICES_PROMPT;
+        const promptWithBusiness = baseTemplate.replace(/{{business_name}}/g, businessName);
+        return `${promptWithBusiness}\n\n${knowledge}`;
+    },
+
+    /**
+     * Логика выбора модели (Спецификация Dokki)
+     */
+    _needsAdvancedModel(userMessage, knowledge) {
+        // Если база знаний выдала много данных или запрос сложный
+        if (knowledge.length > 500) return true;
+        
+        const complexPatterns = [
+            /что лучше|сравни|порекоменду|чем отличается/i,
+            /подбери|помоги выбрать|какой вариант/i,
+            /сколько будет стоить|рассчитай|составь смету/i,
+            /анализ|преимущества|выгода/i
+        ];
+        
+        return complexPatterns.some(pattern => pattern.test(userMessage));
+    },
+
+    /**
+     * Определение готовности клиента к передаче менеджеру
+     */
+    isReadyForManager(userMessage, aiResponse) {
+        const clientReadyPatterns = [
+            /хочу купить|оформить заказ|давайте сделаем/i,
+            /когда можете начать|готов обсудить|свяжитесь со мной/i,
+            /напишите менеджер|позвоните|договор/i,
+            /давайте встретимся|готов заказать/i,
+            /как оплатить|где оплатить|реквизиты/i,
+            /отправьте счет|выставьте счет/i,
+            /хочу обсудить|нужна консультация менеджера/i
+        ];
+
+        const botHandoffPatterns = [
+            /передам.*менеджер/i,
+            /свяжется с вами/i,
+            /обсудить детали/i,
+            /менеджер ответит/i
+        ];
+
+        return clientReadyPatterns.some(p => p.test(userMessage)) ||
+               botHandoffPatterns.some(p => p.test(aiResponse));
+    },
+
+    /**
+     * Основной метод запроса
+     */
+    async ask(botConfig, history, userMessage) {
+        const { openai_key, business_name, system_prompt } = botConfig;
+        const openai = this._getClient(openai_key);
+
+        const knowledge = await this.getRelevantKnowledge(userMessage);
+        const fullSystemPrompt = this._prepareSystemPrompt(system_prompt, business_name, knowledge);
+
+        // Роутинг моделей строго по ТЗ Dokki
+        const model = this._needsAdvancedModel(userMessage, knowledge)
+            ? "gpt-4.1-mini"  
+            : "gpt-4o-mini";  
+
+        log(`[LLM] Запрос для "${business_name}". Модель: ${model}`);
+
+        try {
+            const res = await openai.chat.completions.create({
+                model: model,
+                messages: [
+                    { role: 'system', content: fullSystemPrompt },
+                    ...history.slice(-10), // Лимит контекста для кэширования
+                    { role: 'user', content: userMessage }
+                ],
+                temperature: 0.7,
+            });
+
+            return {
+                text: res.choices[0].message.content,
+                model,
+                tokens: {
+                    input: res.usage.prompt_tokens,
+                    output: res.usage.completion_tokens
+                }
+            };
 
         } catch (error) {
-            console.error(`❌ Ошибка LLM (${model}):`, error.message);
-            throw error;
+            log(`❌ Ошибка OpenAI (${model}): ${error.message}`);
+            
+            if (error.status === 401) throw new Error('Ошибка: Неверный API ключ в настройках бота.');
+            if (error.status === 429) throw new Error('Ошибка: Лимит запросов исчерпан или недостаточно средств в OpenAI.');
+            if (error.status === 500) throw new Error('Ошибка: Сервис OpenAI временно недоступен.');
+            
+            throw new Error('Извините, возникли технические сложности. Попробуйте написать позже.');
         }
     }
 };
