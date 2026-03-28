@@ -5,6 +5,8 @@
 
 import express from 'express';
 import { db } from '../services/database.js';
+import { encrypt } from '../services/encryption.js';
+import { llm } from '../services/llm.js';
 
 const router = express.Router();
 
@@ -33,7 +35,6 @@ const validateConfig = (data) => {
 /**
  * 1. POST /api/config
  * Регистрация нового бота или полное обновление настроек (UPSERT)
- * Используется Flutter-приложением при первом добавлении бота.
  */
 router.post('/', async (req, res) => {
     const { 
@@ -45,10 +46,18 @@ router.post('/', async (req, res) => {
         alerts_topic_id 
     } = req.body;
 
-    // Обязательные поля для создания
     if (!telegram_username || !openai_key || !business_name) {
         return res.status(400).json({ 
+            success: false,
             error: 'Поля telegram_username, openai_key и business_name обязательны' 
+        });
+    }
+
+    if (!openai_key.startsWith('sk-')) {
+        return res.status(400).json({ 
+            success: false,
+            error: 'OpenAI ключ должен начинаться с sk-',
+            field: 'openai_key'
         });
     }
 
@@ -56,13 +65,24 @@ router.post('/', async (req, res) => {
     const validationErrors = validateConfig(req.body);
     
     if (validationErrors.length > 0) {
-        return res.status(400).json({ errors: validationErrors });
+        return res.status(400).json({ success: false, errors: validationErrors });
     }
 
-    try {
-        console.log(`[API POST] Регистрация/Обновление бота: ${formattedUsername}`);
+    console.log(`[API] Валидация OpenAI ключа для ${formattedUsername}...`);
+    
+    const isValidKey = await llm.validateOpenAIKey(openai_key);
+    if (!isValidKey) {
+        return res.status(400).json({ 
+            success: false,
+            error: 'Неверный OpenAI API ключ. Проверьте правильность ключа.',
+            field: 'openai_key'
+        });
+    }
 
-        // SQL логика: Вставить новую запись, а если такой юзернейм уже есть — обновить данные (UPSERT)
+    console.log(`[API] Ключ валиден. Шифрование и сохранение...`);
+    const encryptedKey = encrypt(openai_key);
+
+    try {
         const sql = `
             INSERT INTO bots (
                 telegram_username, 
@@ -87,7 +107,7 @@ router.post('/', async (req, res) => {
 
         const result = await db.query(sql, [
             formattedUsername,
-            openai_key,
+            encryptedKey,
             business_name.trim(),
             system_prompt?.trim() || null,
             welcome_message?.trim() || null,
@@ -95,20 +115,15 @@ router.post('/', async (req, res) => {
         ]);
 
         console.log(`✅ [API POST] Бот успешно сохранен (ID: ${result[0].id})`);
-        
-        res.json({
-            success: true,
-            bot: result[0]
-        });
+        res.json({ success: true, bot: result[0] });
     } catch (error) {
         console.error(`❌ [API POST ERROR] для ${formattedUsername}:`, error.message);
-        res.status(500).json({ error: 'Ошибка при сохранении конфигурации в базу' });
+        res.status(500).json({ success: false, error: 'Ошибка при сохранении конфигурации в базу' });
     }
 });
 
 /**
  * 2. GET /api/config/:username
- * Получение текущих настроек конкретного бота
  */
 router.get('/:username', async (req, res) => {
     const formattedUsername = normalizeUsername(req.params.username);
@@ -122,8 +137,7 @@ router.get('/:username', async (req, res) => {
                 welcome_message, 
                 system_prompt, 
                 alerts_topic_id,
-                status,
-                openai_key -- Передаем во Flutter только если нужно редактировать
+                status
             FROM bots 
             WHERE telegram_username = $1
         `;
@@ -131,9 +145,7 @@ router.get('/:username', async (req, res) => {
         const result = await db.query(sql, [formattedUsername]);
         
         if (!result[0]) {
-            return res.status(404).json({ 
-                error: 'Бот не зарегистрирован. Используйте POST для создания.' 
-            });
+            return res.status(404).json({ error: 'Бот не зарегистрирован.' });
         }
         
         res.json(result[0]);
@@ -145,7 +157,6 @@ router.get('/:username', async (req, res) => {
 
 /**
  * 3. PATCH /api/config/:username
- * Частичное обновление настроек из Flutter (например, только приветствие)
  */
 router.patch('/:username', async (req, res) => {
     const formattedUsername = normalizeUsername(req.params.username);
@@ -153,7 +164,21 @@ router.patch('/:username', async (req, res) => {
 
     const validationErrors = validateConfig(req.body);
     if (validationErrors.length > 0) {
-        return res.status(400).json({ errors: validationErrors });
+        return res.status(400).json({ success: false, errors: validationErrors });
+    }
+
+    let finalKeyToSave = null;
+
+    // Если прислали новый ключ - проверяем и шифруем
+    if (openai_key) {
+        if (!openai_key.startsWith('sk-')) {
+            return res.status(400).json({ success: false, error: 'OpenAI ключ должен начинаться с sk-' });
+        }
+        const isValidKey = await llm.validateOpenAIKey(openai_key);
+        if (!isValidKey) {
+            return res.status(400).json({ success: false, error: 'Неверный OpenAI API ключ.' });
+        }
+        finalKeyToSave = encrypt(openai_key);
     }
 
     try {
@@ -175,29 +200,25 @@ router.patch('/:username', async (req, res) => {
             system_prompt?.trim() || null,
             business_name?.trim() || null,
             alerts_topic_id || null,
-            openai_key || null,
+            finalKeyToSave,
             formattedUsername
         ];
 
         const result = await db.query(sql, params);
         
         if (result.length === 0) {
-            return res.status(404).json({ error: 'Бот не найден' });
+            return res.status(404).json({ success: false, error: 'Бот не найден' });
         }
         
-        res.json({
-            success: true,
-            updated: result[0]
-        });
+        res.json({ success: true, updated: result[0] });
     } catch (error) {
         console.error(`[API PATCH ERROR] для ${formattedUsername}:`, error.message);
-        res.status(500).json({ error: 'Ошибка сервера при сохранении настроек' });
+        res.status(500).json({ success: false, error: 'Ошибка сервера при сохранении настроек' });
     }
 });
 
 /**
  * 4. DELETE /api/config/:username
- * Удаление бота
  */
 router.delete('/:username', async (req, res) => {
     const formattedUsername = normalizeUsername(req.params.username);
@@ -209,13 +230,13 @@ router.delete('/:username', async (req, res) => {
         );
         
         if (result.length === 0) {
-            return res.status(404).json({ error: 'Бот не найден' });
+            return res.status(404).json({ success: false, error: 'Бот не найден' });
         }
         
         console.log(`🗑 [API DELETE] Бот ${formattedUsername} удален`);
         res.json({ success: true, message: `Бот ${formattedUsername} удален` });
     } catch (error) {
-        res.status(500).json({ error: 'Ошибка при удалении' });
+        res.status(500).json({ success: false, error: 'Ошибка при удалении' });
     }
 });
 

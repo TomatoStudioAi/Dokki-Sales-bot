@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import fs from 'fs';
 import { db } from './database.js';
+import { encrypt, decrypt } from './encryption.js';
 import { SALES_SERVICES_PROMPT } from '../prompts/sales-services.js';
 
 const log = (msg) => console.log(`[${new Date().toISOString()}] [LLM_SERVICE] ${msg}`);
@@ -15,10 +16,26 @@ class LLMService {
     }
 
     /**
+     * Валидация ключа перед сохранением в БД
+     */
+    async validateOpenAIKey(apiKey) {
+        try {
+            const openai = new OpenAI({ apiKey });
+            // Запрашиваем список моделей, чтобы проверить работоспособность ключа
+            await openai.models.list();
+            return true;
+        } catch (error) {
+            log(`⚠️ Валидация ключа провалилась: ${error.message}`);
+            return false;
+        }
+    }
+
+    /**
      * Расшифровка голосовых сообщений (Whisper)
      */
-    async transcribe(filePath, apiKey) {
-        const openai = this._getClient(apiKey);
+    async transcribe(filePath, encryptedApiKey) {
+        const decryptedKey = decrypt(encryptedApiKey);
+        const openai = this._getClient(decryptedKey);
         try {
             const transcription = await openai.audio.transcriptions.create({
                 file: fs.createReadStream(filePath),
@@ -36,14 +53,12 @@ class LLMService {
      */
     async getRelevantKnowledge(userInput, botId, language = 'russian') {
         try {
-            // Проверяем наличие продуктов для конкретного бота
             const countRes = await db.query('SELECT COUNT(*) as total FROM products WHERE bot_id = $1', [botId]);
             if (parseInt(countRes[0].total) === 0) {
                 return "";
             }
 
             const searchTerms = userInput.trim();
-            // Поиск по вектору + ILIKE для коротких совпадений
             const sql = `
                 SELECT name, description, price, category
                 FROM products
@@ -84,7 +99,6 @@ class LLMService {
 
     /**
      * Логика выбора модели (Dokki Spec)
-     * gpt-4o для сложных задач, gpt-4o-mini для простых
      */
     _needsAdvancedModel(userMessage, knowledge) {
         if (knowledge.length > 800) return true;
@@ -124,17 +138,20 @@ class LLMService {
     async ask(botConfig, history, userMessage) {
         const { id, openai_key, business_name, system_prompt } = botConfig;
         
-        // Динамический клиент (BYOK)
-        const openai = this._getClient(openai_key);
+        if (!openai_key) {
+            throw new Error('У бота не настроен API ключ OpenAI.');
+        }
+        
+        // Расшифровываем ключ перед использованием
+        const decryptedKey = decrypt(openai_key);
+        const openai = this._getClient(decryptedKey);
 
-        // Получаем знания конкретно этого бота
         const knowledge = await this.getRelevantKnowledge(userMessage, id);
         const fullSystemPrompt = this._prepareSystemPrompt(system_prompt, business_name, knowledge);
 
-        // Роутинг моделей
         const model = this._needsAdvancedModel(userMessage, knowledge)
-            ? "gpt-4o"  // Продвинутая модель
-            : "gpt-4o-mini"; // Стандартная быстрая модель
+            ? "gpt-4o"  
+            : "gpt-4o-mini"; 
 
         log(`[LLM] Запрос бота #${id} (${business_name}). Модель: ${model}`);
 
@@ -143,7 +160,7 @@ class LLMService {
                 model: model,
                 messages: [
                     { role: 'system', content: fullSystemPrompt },
-                    ...history, // История уже отфильтрована в хендлере
+                    ...history,
                     { role: 'user', content: userMessage }
                 ],
                 temperature: 0.7,
