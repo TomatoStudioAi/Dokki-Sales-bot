@@ -141,6 +141,15 @@ class Database {
     }
   }
 
+  async deleteAllProducts() {
+    await this.pool.query('DELETE FROM products');
+  }
+
+  async getProductsCount() {
+    const res = await this.pool.query('SELECT COUNT(*) FROM products');
+    return parseInt(res.rows[0].count, 10);
+  }
+
   // --- МЕТОДЫ УПРАВЛЕНИЯ ПОЛЬЗОВАТЕЛЯМИ ---
 
   async getTopic(userId) {
@@ -179,6 +188,16 @@ class Database {
   async getConfig(key) {
     const res = await this.pool.query('SELECT value FROM bot_config WHERE key = $1', [key]);
     return res.rows[0]?.value;
+  }
+
+  async setConfig(key, value) {
+    const sql = `
+      INSERT INTO bot_config (key, value) 
+      VALUES ($1, $2) 
+      ON CONFLICT (key) 
+      DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+    `;
+    await this.pool.query(sql, [key, JSON.stringify(value)]);
   }
 
   async logMessage(log) {
