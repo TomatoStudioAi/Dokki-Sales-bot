@@ -1,11 +1,16 @@
 import pg from 'pg';
 const { Pool } = pg;
 
+// Нейтральные шаблоны для инициализации первого бота
+const DEFAULT_NEUTRAL_PROMPT = `Ты — профессиональный AI-консультант компании {{business_name}}. 
+Твоя цель — вежливо помогать клиентам, отвечать на вопросы на основе прайс-листа и помогать в выборе услуг.
+Если в прайсе нет ответа — предложи позвать менеджера.`;
+
 class Database {
   constructor() {
     this.pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      max: 30, // Увеличили пул под нагрузку
+      max: 30, // Оптимально для Railway под нагрузкой
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
       ssl: { rejectUnauthorized: false }
@@ -26,14 +31,14 @@ class Database {
   }
 
   /**
-   * Инициализация Production-структуры (Multi-bot)
+   * Инициализация структуры White Label SaaS (Multi-tenant)
    */
   async init() {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
 
-      // 1. БОТЫ (Multi-tenant ядро)
+      // 1. БОТЫ (Ядро платформы)
       await client.query(`
         CREATE TABLE IF NOT EXISTS bots (
           id SERIAL PRIMARY KEY,
@@ -50,7 +55,7 @@ class Database {
         );
       `);
 
-      // 2. ПРАЙС (Привязка к боту + SKU)
+      // 2. ПРАЙС (SKU-центричный поиск)
       await client.query(`
         CREATE TABLE IF NOT EXISTS products (
           id SERIAL PRIMARY KEY,
@@ -70,7 +75,7 @@ class Database {
       `);
       await client.query(`CREATE INDEX IF NOT EXISTS products_search_idx ON products USING GIN(search_vector);`);
 
-      // 3. ТОПИКИ (Связь юзеров с ветками в админ-группах конкретных ботов)
+      // 3. ТОПИКИ (Связь с менеджерами в админ-группах)
       await client.query(`
         CREATE TABLE IF NOT EXISTS user_topics (
           id SERIAL PRIMARY KEY,
@@ -86,7 +91,7 @@ class Database {
         );
       `);
 
-      // 4. ДИАЛОГИ (Мета-данные сессий)
+      // 4. ДИАЛОГИ (Мета-данные)
       await client.query(`
         CREATE TABLE IF NOT EXISTS conversations (
           id SERIAL PRIMARY KEY,
@@ -113,7 +118,7 @@ class Database {
       `);
       await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at DESC);`);
 
-      // 6. БИЛЛИНГ И СТАТИСТИКА (Usage Logs)
+      // 6. БИЛЛИНГ И Usage Logs
       await client.query(`
         CREATE TABLE IF NOT EXISTS usage_logs (
           id SERIAL PRIMARY KEY,
@@ -128,13 +133,13 @@ class Database {
       `);
 
       await client.query('COMMIT');
-      console.log('🚀 [DATABASE] Production schema initialized successfully');
+      console.log('🚀 [DATABASE] Production schema initialized');
 
       await this.ensureDefaults();
 
     } catch (e) {
       await client.query('ROLLBACK');
-      console.error('❌ [DATABASE] Init Critical Error:', e.message);
+      console.error('❌ [DATABASE] Init Error:', e.message);
       throw e;
     } finally {
       client.release();
@@ -142,20 +147,18 @@ class Database {
   }
 
   /**
-   * Гарантируем наличие хотя бы одного системного бота для тестов
+   * Гарантируем наличие нейтральной записи для первого запуска
    */
   async ensureDefaults() {
     try {
       const res = await this.pool.query('SELECT COUNT(*) FROM bots');
       if (res.rows[0].count === '0') {
-        const defaultPrompt = `Ты — AI-ассистент Dokki Business. Твоя цель — профессиональная консультация и продажи.`;
-        
         await this.pool.query(`
           INSERT INTO bots (telegram_username, openai_key, business_name, system_prompt) 
           VALUES ($1, $2, $3, $4)
-        `, ['DokkiSystemBot', 'sk-placeholder', 'Dokki Business', defaultPrompt]);
+        `, ['@SystemBot', 'sk-placeholder', 'Ваша Компания', DEFAULT_NEUTRAL_PROMPT]);
         
-        console.log('✅ [DATABASE] Default test bot created');
+        console.log('✅ [DATABASE] Default neutral bot created');
       }
     } catch (e) {
       console.error('❌ [DATABASE] ensureDefaults Error:', e.message);
@@ -163,38 +166,38 @@ class Database {
   }
 
   /**
-   * Логирование сообщения и обновление статистики (Атомарно)
+   * Логирование взаимодействия (Транзакционно: Conversation -> Message -> Usage)
    */
   async logInteraction(botId, userId, messageData, usageData) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
 
-      // 1. Получаем ID диалога
-      let conv = await client.query(
+      // 1. Поиск или создание диалога
+      let convRes = await client.query(
         'SELECT id FROM conversations WHERE bot_id = $1 AND user_id = $2',
         [botId, userId]
       );
       
       let conversationId;
-      if (!conv.rows[0]) {
+      if (!convRes.rows[0]) {
         const newConv = await client.query(
           'INSERT INTO conversations (bot_id, user_id) VALUES ($1, $2) RETURNING id',
           [botId, userId]
         );
         conversationId = newConv.rows[0].id;
       } else {
-        conversationId = conv.rows[0].id;
+        conversationId = convRes.rows[0].id;
       }
 
-      // 2. Записываем сообщение
+      // 2. Запись сообщения
       await client.query(
         `INSERT INTO messages (conversation_id, role, content, model_used, tokens_input, tokens_output) 
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [conversationId, messageData.role, messageData.content, usageData.model, usageData.input, usageData.output]
       );
 
-      // 3. Обновляем Usage Logs (UPSERT)
+      // 3. Атомарное обновление статистики (UPSERT)
       const period = new Date().toISOString().split('T')[0];
       await client.query(`
         INSERT INTO usage_logs (bot_id, period, messages_count, tokens_input, tokens_output)
@@ -215,7 +218,7 @@ class Database {
   }
 
   /**
-   * Получение истории для OpenAI (теперь из нормализованной таблицы)
+   * История из нормализованной таблицы для контекста OpenAI
    */
   async getChatHistory(botId, userId, limit = 15) {
     const sql = `
@@ -227,7 +230,7 @@ class Database {
       LIMIT $3
     `;
     const res = await this.query(sql, [botId, userId, limit]);
-    return res.reverse(); // Возвращаем в хронологическом порядке
+    return res.reverse(); // Хронологический порядок для ИИ
   }
 }
 

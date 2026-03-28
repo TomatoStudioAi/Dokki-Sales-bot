@@ -5,100 +5,108 @@ import { handleMessage } from './handlers/message.js';
 import configRoutes from './routes/config.js';
 import pricesRoutes from './routes/prices.js';
 
+// Универсальный логгер
 const log = (msg) => console.log(`[${new Date().toISOString()}] [SYSTEM] ${msg}`);
 
-// Конфигурация из переменных окружения Railway
+// Конфигурация из среды (Railway)
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const port = process.env.PORT || 3000;
 
 if (!token) {
-    log('❌ КРИТИЧЕСКАЯ ОШИБКА: TELEGRAM_BOT_TOKEN не найден!');
+    log('❌ КРИТИЧЕСКАЯ ОШИБКА: TELEGRAM_BOT_TOKEN не найден в переменных окружения!');
     process.exit(1);
 }
 
 const bot = new Telegraf(token);
 const app = express();
 
-const DEFAULT_WELCOME = `Здравствуйте! 👋\nЯ AI-консультант. Чем могу вам помочь?`;
+// --- НЕЙТРАЛЬНЫЕ ШАБЛОНЫ (White Label) ---
+const DEFAULT_FALLBACK_NAME = 'нашей компании';
+const DEFAULT_WELCOME_TEMPLATE = `Здравствуйте! 👋 Я AI-консультант компании {{business_name}}. Чем могу помочь?`;
 
-// --- MIDDLEWARE & ROUTES ---
+// Middleware
 app.use(express.json());
 
-// API для настроек и прайса
+// API эндпоинты для Flutter-приложения
 app.use('/api/config', configRoutes);
 app.use('/api/prices', pricesRoutes);
 
 /**
- * Health check: проверяет статус бота и доступность БД
+ * Health check — мониторинг работоспособности сервера и БД
  */
 app.get('/', async (req, res) => {
     try {
         await db.query('SELECT 1');
         res.json({ 
             status: 'ok', 
-            bot: 'online', 
             database: 'connected',
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            service: 'White Label Bot Engine'
         });
-    } catch (error) {
-        log(`[HEALTH CHECK ERROR] ${error.message}`);
+    } catch (e) {
+        log(`❌ Health check failed: ${e.message}`);
         res.status(500).json({ status: 'error', database: 'disconnected' });
     }
 });
 
 /**
- * Обработка /start: берем данные из таблицы bots (Multi-bot logic)
+ * Обработка команды /start
+ * Реализует динамическую идентификацию клиента без хардкода ID
  */
 bot.start(async (ctx) => {
     try {
-        const botUsername = ctx.botInfo.username;
+        // Динамически получаем юзернейм текущего бота
+        const botUsername = `@${ctx.botInfo.username}`;
         
-        // Ищем настройки конкретно для этого бота
-        const botData = await db.query(
-            'SELECT business_name, welcome_message FROM bots WHERE telegram_username = $1 OR id = 1 LIMIT 1',
+        // Ищем настройки именно этого бота в базе
+        const res = await db.query(
+            'SELECT business_name, welcome_message FROM bots WHERE telegram_username = $1',
             [botUsername]
         );
+        
+        const botData = res[0];
 
-        if (!botData[0]) {
-            log(`⚠️ Бот @${botUsername} не найден в таблице bots`);
-            return ctx.reply(DEFAULT_WELCOME);
+        // Если бот не найден в базе (новый клиент еще не зарегистрировался через приложение)
+        if (!botData) {
+            log(`⚠️ Попытка старта незарегистрированного бота: ${botUsername}`);
+            return ctx.reply('Здравствуйте! Бот находится в процессе настройки. Пожалуйста, попробуйте позже.');
         }
 
-        const { welcome_message, business_name } = botData[0];
-        const text = welcome_message || DEFAULT_WELCOME.replace('AI-консультант', `AI-консультант компании ${business_name}`);
+        const { business_name, welcome_message } = botData;
+        const name = business_name || DEFAULT_FALLBACK_NAME;
+
+        // Приоритет: 1. Кастомное приветствие клиента -> 2. Нейтральный шаблон с названием компании
+        const text = welcome_message || DEFAULT_WELCOME_TEMPLATE.replace('{{business_name}}', name);
         
         return ctx.reply(text);
-    } catch (error) {
-        log(`❌ Ошибка /start: ${error.message}`);
-        return ctx.reply(DEFAULT_WELCOME);
+    } catch (e) {
+        log(`❌ Ошибка выполнения /start для @${ctx.botInfo.username}: ${e.message}`);
+        return ctx.reply('Здравствуйте! Чем я могу вам помочь?');
     }
 });
 
 /**
- * Основной хендлер сообщений
+ * Передача всех текстовых и голосовых сообщений в основной хендлер
  */
 bot.on(['text', 'voice'], handleMessage);
 
 /**
- * ЗАПУСК ПРИЛОЖЕНИЯ
+ * Запуск инфраструктуры
  */
 async function startApp() {
     try {
-        log('⏳ Инициализация базы данных...');
-        // Создает все таблицы (bots, products, messages, usage_logs) автоматически
+        // 1. Инициализируем таблицы БД (если их нет)
         await db.init();
-        log('✅ Структура БД проверена и готова');
+        log('✅ База данных готова (Production Schema)');
 
-        // Запуск Telegram бота
-        const botInfo = await bot.telegram.getMe();
+        // 2. Запускаем Telegram-движок
         bot.launch();
-        log(`✅ Бот @${botInfo.username} запущен`);
+        log(`✅ Бот @${bot.botInfo?.username || 'unknown'} успешно запущен`);
 
-        // Запуск Express сервера для API (Flutter/Postman)
+        // 3. Запускаем API-сервер для Flutter
         app.listen(port, () => {
-            log(`✅ Express сервер слушает порт ${port}`);
+            log(`✅ API сервер запущен на порту ${port}`);
         });
-
     } catch (error) {
         log(`❌ КРИТИЧЕСКАЯ ОШИБКА ЗАПУСКА: ${error.message}`);
         process.exit(1);
@@ -107,12 +115,12 @@ async function startApp() {
 
 startApp();
 
-// Graceful shutdown (корректное завершение)
+// Корректное завершение при остановке контейнера на Railway
 process.once('SIGINT', () => {
     bot.stop('SIGINT');
-    log('Process SIGINT: Бот остановлен');
+    log('Бот остановлен (SIGINT)');
 });
 process.once('SIGTERM', () => {
     bot.stop('SIGTERM');
-    log('Process SIGTERM: Бот остановлен');
+    log('Бот остановлен (SIGTERM)');
 });

@@ -1,9 +1,6 @@
 /**
- * API для управления конфигурацией бота
- * * TODO (Production): 
- * - Добавить middleware для аутентификации (JWT/API-Key)
- * - Валидировать bot_id из токена
- * - Добавить Rate limiting для защиты от спама
+ * API для управления конфигурацией ботов
+ * Реализовано по принципу White Label: каждый клиент управляет только своим ботом.
  */
 
 import express from 'express';
@@ -11,124 +8,134 @@ import { db } from '../services/database.js';
 
 const router = express.Router();
 
+// --- ХЕЛПЕРЫ ВАЛИДАЦИИ ---
+const validateConfig = (data) => {
+    const errors = [];
+    if (data.welcome_message && data.welcome_message.length > 500) {
+        errors.push('Приветствие не может быть длиннее 500 символов');
+    }
+    if (data.system_prompt && data.system_prompt.length > 3000) {
+        errors.push('Системный промпт не может быть длиннее 3000 символов');
+    }
+    if (data.business_name && data.business_name.length > 100) {
+        errors.push('Название компании слишком длинное');
+    }
+    return errors;
+};
+
 /**
- * 1. PUT /api/config/welcome
- * Обновление приветственного сообщения из Flutter
+ * 1. GET /api/config/:username
+ * Получение полной конфигурации конкретного бота
  */
-router.put('/welcome', async (req, res) => {
-    const { welcome_message } = req.body;
-    
-    if (!welcome_message || welcome_message.trim().length === 0) {
-        return res.status(400).json({ error: 'welcome_message обязателен' });
-    }
-    
-    if (welcome_message.length > 500) {
-        return res.status(400).json({ error: 'Максимальная длина приветствия — 500 символов' });
-    }
-    
+router.get('/:username', async (req, res) => {
+    const { username } = req.params;
+    const formattedUsername = username.startsWith('@') ? username : `@${username}`;
+
     try {
         const sql = `
-            UPDATE bot_config 
-            SET welcome_message = $1 
-            WHERE id = (SELECT id FROM bot_config LIMIT 1)
-            RETURNING welcome_message
+            SELECT 
+                id, 
+                telegram_username, 
+                business_name, 
+                welcome_message, 
+                system_prompt, 
+                alerts_topic_id,
+                status
+            FROM bots 
+            WHERE telegram_username = $1
         `;
         
-        const result = await db.query(sql, [welcome_message.trim()]);
+        const result = await db.query(sql, [formattedUsername]);
+        
+        if (!result[0]) {
+            return res.status(404).json({ 
+                error: 'Бот с таким username не зарегистрирован в системе' 
+            });
+        }
+        
+        res.json(result[0]);
+    } catch (error) {
+        console.error(`[API GET CONFIG] Ошибка для ${formattedUsername}:`, error.message);
+        res.status(500).json({ error: 'Ошибка сервера при получении данных' });
+    }
+});
+
+/**
+ * 2. PATCH /api/config/:username
+ * Универсальное обновление настроек (Приветствие, Промпт, Имя бизнеса)
+ * Используем PATCH и COALESCE для частичного обновления данных из Flutter
+ */
+router.patch('/:username', async (req, res) => {
+    const { username } = req.params;
+    const formattedUsername = username.startsWith('@') ? username : `@${username}`;
+    const { welcome_message, system_prompt, business_name, alerts_topic_id } = req.body;
+
+    // Валидация входных данных
+    const validationErrors = validateConfig(req.body);
+    if (validationErrors.length > 0) {
+        return res.status(400).json({ errors: validationErrors });
+    }
+
+    try {
+        // COALESCE позволяет обновить только те поля, которые прислал Flutter, сохранив остальные
+        const sql = `
+            UPDATE bots 
+            SET 
+                welcome_message = COALESCE($1, welcome_message),
+                system_prompt = COALESCE($2, system_prompt),
+                business_name = COALESCE($3, business_name),
+                alerts_topic_id = COALESCE($4, alerts_topic_id),
+                updated_at = NOW()
+            WHERE telegram_username = $5
+            RETURNING id, telegram_username, business_name, updated_at
+        `;
+        
+        const params = [
+            welcome_message?.trim() || null,
+            system_prompt?.trim() || null,
+            business_name?.trim() || null,
+            alerts_topic_id || null,
+            formattedUsername
+        ];
+
+        const result = await db.query(sql, params);
         
         if (result.length === 0) {
-            return res.status(404).json({ error: 'Конфигурация бота не найдена' });
+            return res.status(404).json({ error: 'Бот не найден. Сначала создайте запись в БД.' });
         }
         
         res.json({
             success: true,
-            welcome_message: result[0].welcome_message
+            message: 'Конфигурация успешно обновлена',
+            updated: result[0]
         });
     } catch (error) {
-        console.error('[API] Ошибка обновления welcome_message:', error.message);
-        res.status(500).json({ error: 'Ошибка сервера' });
+        console.error(`[API PATCH CONFIG] Ошибка для ${formattedUsername}:`, error.message);
+        res.status(500).json({ error: 'Ошибка сервера при сохранении настроек' });
     }
 });
 
 /**
- * 2. GET /api/config/welcome
+ * 3. DELETE /api/config/:username
+ * Удаление бота из системы (например, при отписке клиента)
  */
-router.get('/welcome', async (req, res) => {
-    try {
-        const sql = `SELECT welcome_message, business_name FROM bot_config LIMIT 1`;
-        const result = await db.query(sql);
-        
-        if (!result[0]) {
-            return res.status(404).json({ error: 'Конфигурация не найдена' });
-        }
-        
-        res.json({
-            welcome_message: result[0].welcome_message,
-            business_name: result[0].business_name
-        });
-    } catch (error) {
-        console.error('[API] Ошибка получения welcome_message:', error.message);
-        res.status(500).json({ error: 'Ошибка сервера' });
-    }
-});
+router.delete('/:username', async (req, res) => {
+    const { username } = req.params;
+    const formattedUsername = username.startsWith('@') ? username : `@${username}`;
 
-/**
- * 3. PUT /api/config/prompt
- * Обновление системного промпта для AI
- */
-router.put('/prompt', async (req, res) => {
-    const { system_prompt } = req.body;
-    
-    if (!system_prompt || system_prompt.trim().length === 0) {
-        return res.status(400).json({ error: 'system_prompt не может быть пустым' });
-    }
-    
-    if (system_prompt.length > 2000) {
-        return res.status(400).json({ error: 'Максимальная длина промпта — 2000 символов' });
-    }
-    
     try {
-        const sql = `
-            UPDATE bot_config 
-            SET system_prompt = $1 
-            WHERE id = (SELECT id FROM bot_config LIMIT 1)
-            RETURNING system_prompt
-        `;
-        
-        const result = await db.query(sql, [system_prompt.trim()]);
+        const result = await db.query(
+            'DELETE FROM bots WHERE telegram_username = $1 RETURNING id', 
+            [formattedUsername]
+        );
         
         if (result.length === 0) {
-            return res.status(404).json({ error: 'Конфигурация не найдена' });
+            return res.status(404).json({ error: 'Бот не найден' });
         }
         
-        res.json({
-            success: true,
-            system_prompt: result[0].system_prompt
-        });
+        res.json({ success: true, message: `Бот ${formattedUsername} удален из системы` });
     } catch (error) {
-        console.error('[API] Ошибка PUT /prompt:', error.message);
-        res.status(500).json({ error: 'Ошибка сервера' });
-    }
-});
-
-/**
- * 4. GET /api/config/prompt
- */
-router.get('/prompt', async (req, res) => {
-    try {
-        const sql = `SELECT system_prompt FROM bot_config LIMIT 1`;
-        const result = await db.query(sql);
-        
-        if (!result[0]) {
-            return res.status(404).json({ error: 'Настройки не найдены' });
-        }
-        
-        res.json({
-            system_prompt: result[0].system_prompt
-        });
-    } catch (error) {
-        console.error('[API] Ошибка GET /prompt:', error.message);
-        res.status(500).json({ error: 'Ошибка сервера' });
+        res.status(500).json({ error: 'Ошибка при удалении' });
     }
 });
 

@@ -4,36 +4,41 @@ import { db } from '../services/database.js';
 const router = express.Router();
 
 /**
- * Валидация и подготовка данных товара.
- * Если SKU не передан, он генерируется на основе имени.
+ * Валидация и автоматическая генерация SKU.
  */
 function validateAndPrepareProduct(p) {
     if (!p.name || typeof p.name !== 'string') {
-        throw new Error(`Имя товара обязательно и должно быть строкой`);
+        throw new Error(`Имя товара обязательно`);
     }
 
-    // Генерация SKU из названия, если он не указан
+    // Авто-генерация SKU, если он не передан
     if (!p.sku) {
         p.sku = p.name
             .toLowerCase()
-            .replace(/[^a-zа-я0-9\s]/g, '') // Удаляем спецсимволы
-            .replace(/\s+/g, '-')           // Заменяем пробелы на дефисы
-            .slice(0, 50);                  // Ограничиваем длину
-    }
-
-    if (typeof p.sku !== 'string' || p.sku.length > 50) {
-        throw new Error(`SKU для "${p.name}" должен быть строкой до 50 символов`);
+            .replace(/[^a-zа-я0-9\s]/g, '')
+            .replace(/\s+/g, '-')
+            .slice(0, 50);
     }
 
     if (p.price !== undefined && (typeof p.price !== 'number' || p.price < 0)) {
-        throw new Error(`Цена для "${p.name}" должна быть положительным числом`);
+        throw new Error(`Некорректная цена для "${p.name}"`);
     }
 
     return true;
 }
 
 /**
- * 1. GET /api/prices/:bot_id — Получить весь прайс конкретного бота
+ * Хелпер: Проверка существования бота перед операциями с прайсом
+ */
+async function ensureBotExists(botId) {
+    const res = await db.query('SELECT id FROM bots WHERE id = $1', [botId]);
+    if (!res[0]) throw new Error(`Бот с ID ${botId} не найден в системе`);
+    return true;
+}
+
+/**
+ * 1. GET /api/prices/:bot_id
+ * Получить весь прайс конкретного бота по его ID
  */
 router.get('/:bot_id', async (req, res) => {
     const { bot_id } = req.params;
@@ -45,60 +50,70 @@ router.get('/:bot_id', async (req, res) => {
              ORDER BY category ASC, name ASC`,
             [bot_id]
         );
-        res.json({ 
-            success: true, 
-            bot_id: parseInt(bot_id), 
-            count: products.length, 
-            products 
-        });
+        res.json({ success: true, count: products.length, products });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
 /**
- * 2. DELETE /api/prices/:bot_id — Полная очистка прайса конкретного бота
+ * 2. GET /api/prices/by-username/:username
+ * Удобный поиск прайса для Flutter, если известен только юзернейм бота
+ */
+router.get('/by-username/:username', async (req, res) => {
+    const { username } = req.params;
+    const formattedUsername = username.startsWith('@') ? username : `@${username}`;
+
+    try {
+        const bot = await db.query('SELECT id FROM bots WHERE telegram_username = $1', [formattedUsername]);
+        if (!bot[0]) return res.status(404).json({ error: 'Бот не найден' });
+        
+        const products = await db.query(
+            'SELECT sku, name, category, price, description FROM products WHERE bot_id = $1 ORDER BY category, name',
+            [bot[0].id]
+        );
+        
+        res.json({ success: true, bot_id: bot[0].id, products });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * 3. DELETE /api/prices/:bot_id
+ * Полная очистка прайса
  */
 router.delete('/:bot_id', async (req, res) => {
     const { bot_id } = req.params;
     try {
-        const result = await db.query(
-            'DELETE FROM products WHERE bot_id = $1 RETURNING id', 
-            [bot_id]
-        );
-        res.json({ 
-            success: true, 
-            message: `Прайс бота #${bot_id} полностью удален`, 
-            deleted_count: result.length 
-        });
+        await ensureBotExists(bot_id);
+        const result = await db.query('DELETE FROM products WHERE bot_id = $1 RETURNING id', [bot_id]);
+        res.json({ success: true, deleted_count: result.length });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(400).json({ error: error.message });
     }
 });
 
 /**
- * 3. PUT /api/prices/:bot_id — Полная замена прайса (Атомарная транзакция)
+ * 4. PUT /api/prices/:bot_id
+ * ПОЛНАЯ ЗАМЕНА прайса (Атомарно)
  */
 router.put('/:bot_id', async (req, res) => {
     const { bot_id } = req.params;
     const { products } = req.body;
 
-    if (!Array.isArray(products)) {
-        return res.status(400).json({ error: 'Поле products должно быть массивом' });
-    }
+    if (!Array.isArray(products)) return res.status(400).json({ error: 'Ожидается массив products' });
 
     try {
-        // Предварительная валидация всех элементов
+        await ensureBotExists(bot_id);
         products.forEach(validateAndPrepareProduct);
 
         const client = await db.pool.connect();
         try {
             await client.query('BEGIN');
-            
-            // Удаляем старый прайс конкретного бота
+            // Удаляем старое
             await client.query('DELETE FROM products WHERE bot_id = $1', [bot_id]);
-            
-            // Вставляем новые позиции
+            // Вставляем новое
             for (const p of products) {
                 await client.query(
                     `INSERT INTO products (bot_id, sku, name, category, price, description) 
@@ -106,13 +121,8 @@ router.put('/:bot_id', async (req, res) => {
                     [bot_id, p.sku, p.name, p.category || 'Общее', p.price || 0, p.description || '']
                 );
             }
-            
             await client.query('COMMIT');
-            res.json({ 
-                success: true, 
-                message: `Прайс успешно заменен для бота #${bot_id}`, 
-                count: products.length 
-            });
+            res.json({ success: true, message: 'Прайс-лист полностью обновлен', count: products.length });
         } catch (e) {
             await client.query('ROLLBACK');
             throw e;
@@ -125,24 +135,24 @@ router.put('/:bot_id', async (req, res) => {
 });
 
 /**
- * 4. POST /api/prices/:bot_id — Добавление или обновление по SKU (UPSERT)
+ * 5. POST /api/prices/:bot_id
+ * UPSERT (Обновление существующих SKU или добавление новых)
  */
 router.post('/:bot_id', async (req, res) => {
     const { bot_id } = req.params;
     const { products } = req.body;
 
-    if (!Array.isArray(products)) {
-        return res.status(400).json({ error: 'Ожидается массив товаров' });
-    }
+    if (!Array.isArray(products)) return res.status(400).json({ error: 'Ожидается массив' });
 
     try {
+        await ensureBotExists(bot_id);
         products.forEach(validateAndPrepareProduct);
+
         const client = await db.pool.connect();
-        
         try {
             await client.query('BEGIN');
             for (const p of products) {
-                const sql = `
+                await client.query(`
                     INSERT INTO products (bot_id, sku, name, category, price, description)
                     VALUES ($1, $2, $3, $4, $5, $6)
                     ON CONFLICT (bot_id, sku) DO UPDATE SET
@@ -151,21 +161,10 @@ router.post('/:bot_id', async (req, res) => {
                         price = EXCLUDED.price,
                         description = EXCLUDED.description,
                         created_at = NOW()
-                `;
-                await client.query(sql, [
-                    bot_id, 
-                    p.sku, 
-                    p.name, 
-                    p.category || 'Общее', 
-                    p.price || 0, 
-                    p.description || ''
-                ]);
+                `, [bot_id, p.sku, p.name, p.category || 'Общее', p.price || 0, p.description || '']);
             }
             await client.query('COMMIT');
-            res.json({ 
-                success: true, 
-                message: `Товары синхронизированы по SKU для бота #${bot_id}` 
-            });
+            res.json({ success: true, message: 'Товары синхронизированы по SKU' });
         } catch (e) {
             await client.query('ROLLBACK');
             throw e;
