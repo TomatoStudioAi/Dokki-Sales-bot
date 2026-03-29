@@ -1,6 +1,7 @@
 import pg from 'pg';
 const { Pool } = pg;
 
+// Полностью нейтральный шаблон для новых ботов (White Label)
 const DEFAULT_NEUTRAL_PROMPT = `Ты — профессиональный AI-консультант компании {{business_name}}. 
 Твоя цель — вежливо помогать клиентам, отвечать на вопросы на основе прайс-листа и помогать в выборе услуг.
 Если в прайсе нет ответа — предложи позвать менеджера.`;
@@ -16,6 +17,9 @@ class Database {
     });
   }
 
+  /**
+   * Универсальный метод для выполнения запросов с логированием ошибок
+   */
   async query(text, params) {
     try {
       const res = await this.pool.query(text, params);
@@ -26,6 +30,9 @@ class Database {
     }
   }
 
+  /**
+   * Инициализация Production-структуры
+   */
   async init() {
     const client = await this.pool.connect();
     try {
@@ -68,7 +75,7 @@ class Database {
       `);
       await client.query(`CREATE INDEX IF NOT EXISTS products_search_idx ON products USING GIN(search_vector);`);
 
-      // 3. ТАБЛИЦА ТОПИКОВ (Для менеджеров)
+      // 3. ТАБЛИЦА ТОПИКОВ
       await client.query(`
         CREATE TABLE IF NOT EXISTS user_topics (
           id SERIAL PRIMARY KEY,
@@ -84,7 +91,7 @@ class Database {
         );
       `);
 
-      // 4. ТАБЛИЦА ДИАЛОГОВ + Индекс для быстрого поиска
+      // 4. ТАБЛИЦА ДИАЛОГОВ
       await client.query(`
         CREATE TABLE IF NOT EXISTS conversations (
           id SERIAL PRIMARY KEY,
@@ -155,15 +162,22 @@ class Database {
   }
 
   /**
-   * Поиск конфига бота (бронебойный)
+   * Поиск конфига бота
+   * Автоматически нормализует имя (добавляет @ и приводит к нижнему регистру)
    */
   async getBotConfig(username) {
+    if (!username) return null;
+
+    // Нормализация: убираем пробелы, в нижний регистр и добавляем @ если нет
+    const clean = username.trim().toLowerCase();
+    const normalized = clean.startsWith('@') ? clean : `@${clean}`;
+
     const sql = `
         SELECT * FROM bots 
-        WHERE LOWER(TRIM(telegram_username)) = LOWER(TRIM($1)) 
+        WHERE telegram_username = $1 
         AND status = 'active'
     `;
-    const res = await this.query(sql, [username]);
+    const res = await this.query(sql, [normalized]);
     return res[0] || null;
   }
 
@@ -213,6 +227,9 @@ class Database {
     }
   }
 
+  /**
+   * Получение истории диалога для ИИ
+   */
   async getChatHistory(botId, userId, limit = 15) {
     const sql = `
       SELECT m.role, m.content 
@@ -223,7 +240,7 @@ class Database {
       LIMIT $3
     `;
     const res = await this.query(sql, [botId, userId, limit]);
-    return res.reverse(); // Возвращаем: старые -> новые
+    return res.reverse(); 
   }
 }
 
