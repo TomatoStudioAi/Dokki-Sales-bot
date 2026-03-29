@@ -6,9 +6,13 @@ const ALGORITHM = 'aes-256-gcm';
 // если переменная окружения еще не успела подгрузиться
 function getKey() {
     const keyHex = process.env.ENCRYPTION_KEY;
+    
     if (!keyHex) {
-        throw new Error('❌ КРИТИЧЕСКАЯ ОШИБКА: ENCRYPTION_KEY не установлен в переменных окружения!');
+        console.warn('⚠️ ВНИМАНИЕ: ENCRYPTION_KEY не установлен! Используется временный ключ (небезопасно для production).');
+        // Генерируем временный ключ, чтобы избежать падения (краша) при запуске
+        return crypto.randomBytes(32);
     }
+    
     return Buffer.from(keyHex, 'hex');
 }
 
