@@ -6,6 +6,7 @@ const ADMIN_GROUP_ID = process.env.TELEGRAM_ADMIN_GROUP_ID;
 
 /**
  * Получение или создание топика с проверкой на валидность (Self-Healing)
+ * ИСПРАВЛЕНО: Теперь проверяет именно топик через sendChatAction
  */
 async function getOrCreateClientTopic(ctx, botId) {
     const userId = ctx.from.id;
@@ -21,16 +22,20 @@ async function getOrCreateClientTopic(ctx, botId) {
 
         if (topicId) {
             try {
-                // Проверка "на вшивость": пробуем получить инфо о топике
-                // Если топик удален, это вызовет ошибку 400
-                await ctx.telegram.getChat(ADMIN_GROUP_ID); 
+                // ПРОВЕРКА: Пытаемся отправить действие "typing" именно в этот топик
+                // Если топик удален, Telegram вернет ошибку 400 (message thread not found)
+                await ctx.telegram.sendChatAction(ADMIN_GROUP_ID, 'typing', {
+                    message_thread_id: topicId
+                });
                 return topicId;
             } catch (e) {
-                log(`⚠️ Топик ${topicId} кажется невалидным. Проверяем при отправке.`);
+                log(`⚠️ Топик ${topicId} удален в Telegram. Очистка БД и пересоздание...`);
+                await db.query('DELETE FROM user_topics WHERE bot_id = $1 AND user_id = $2', [botId, userId]);
+                topicId = null; 
             }
         }
 
-        // Создаем новый топик
+        // Создаем новый топик, если старого нет или он был удален
         log(`[TOPIC] Создание новой ветки для ${displayName}`);
         const topic = await ctx.telegram.createForumTopic(ADMIN_GROUP_ID, topicName);
         topicId = topic.message_thread_id;
@@ -38,9 +43,11 @@ async function getOrCreateClientTopic(ctx, botId) {
         await db.query(`
             INSERT INTO user_topics (bot_id, user_id, topic_id, username, first_name)
             VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (bot_id, user_id) DO UPDATE SET topic_id = EXCLUDED.topic_id
+            ON CONFLICT (bot_id, user_id) 
+            DO UPDATE SET topic_id = EXCLUDED.topic_id, updated_at = NOW()
         `, [botId, userId, topicId, username, firstName]);
         
+        log(`✅ Новый топик ${topicId} успешно привязан`);
         return topicId;
     } catch (error) {
         log(`❌ Ошибка управления топиками: ${error.message}`);
@@ -61,15 +68,13 @@ async function sendToClientTopic(ctx, botConfig, text, extra = {}) {
             message_thread_id: topicId
         });
     } catch (error) {
-        // Если топик не найден (был удален вручную)
+        // Дополнительная проверка на случай, если топик удалили в секунду между проверкой и отправкой
         if (error.description?.includes('message thread not found')) {
-            log(`🔄 Топик ${topicId} удален в TG. Сбрасываю БД и пробую снова...`);
+            log(`🔄 Повторная очистка БД для ${topicId}...`);
             await db.query('DELETE FROM user_topics WHERE bot_id = $1 AND user_id = $2', [botConfig.id, ctx.from.id]);
-            
-            // Рекурсивная попытка: теперь getOrCreateClientTopic создаст новый
             return sendToClientTopic(ctx, botConfig, text, extra);
         }
-        log(`❌ Ошибка safeSend: ${error.message}`);
+        log(`❌ Ошибка отправки в топик: ${error.message}`);
     }
 }
 
@@ -82,7 +87,7 @@ async function sendManagerAlert(ctx, botConfig, userText, aiAnswer) {
     const userId = ctx.from.id;
     const displayName = ctx.from.username ? `@${ctx.from.username}` : `<b>${ctx.from.first_name || 'Клиент'}</b> (ID: ${userId})`;
     
-    // Ссылка на будущий или текущий топик
+    // Получаем ID топика для формирования ссылки
     const clientTopicId = await getOrCreateClientTopic(ctx, botConfig.id);
     const cleanGroupId = Math.abs(ADMIN_GROUP_ID).toString().replace(/^100/, '');
     const clientLink = `https://t.me/c/${cleanGroupId}/${clientTopicId}`;
@@ -90,25 +95,23 @@ async function sendManagerAlert(ctx, botConfig, userText, aiAnswer) {
     const alertText = `🔔 <b>ГОРЯЧИЙ КЛИЕНТ</b>\n\n` +
                       `👤 Клиент: ${displayName}\n` +
                       `💬 Запрос: <i>"${userText}"</i>\n` +
-                      `🤖 Бот: @${botConfig.telegram_username}\n\n` +
+                      `🤖 Бот: @${ctx.botInfo.username}\n\n` +
                       `👉 <a href="${clientLink}">ОТКРЫТЬ ЧАТ С КЛИЕНТОМ</a>`;
 
     try {
-        // Шлем алерт в специальный топик (№6)
+        // Шлем алерт в специальный топик (если указан в конфиге) или в General
         await ctx.telegram.sendMessage(ADMIN_GROUP_ID, alertText, {
             parse_mode: 'HTML',
             message_thread_id: botConfig.alerts_topic_id || null 
         });
     } catch (error) {
-        if (error.description?.includes('message thread not found')) {
-            log('⚠️ Топик алертов не найден, шлю в General');
-            await ctx.telegram.sendMessage(ADMIN_GROUP_ID, alertText, { parse_mode: 'HTML' });
-        }
+        log(`⚠️ Ошибка отправки алерта: ${error.message}. Шлю в основной чат.`);
+        await ctx.telegram.sendMessage(ADMIN_GROUP_ID, alertText, { parse_mode: 'HTML' });
     }
 }
 
 /**
- * Основной обработчик
+ * Основной обработчик входящих сообщений
  */
 export async function handleMessage(ctx) {
     if (!ctx.message?.text) return;
@@ -118,27 +121,29 @@ export async function handleMessage(ctx) {
     const botUsername = `@${ctx.botInfo.username.toLowerCase()}`;
 
     try {
+        // 1. Получаем конфиг бота
         const config = await db.getBotConfig(botUsername);
         if (!config) return;
 
-        // ИИ Логика
+        // 2. Работаем с ИИ
         const history = await db.getChatHistory(config.id, userId, 15);
         const aiResult = await llm.ask(config, history, userText);
 
-        // Сохранение в БД
+        // 3. Логируем взаимодействие в БД
         await db.logInteraction(config.id, userId, { role: 'user', content: userText }, { model: aiResult.model, input: aiResult.tokens.input, output: 0 });
         await db.logInteraction(config.id, userId, { role: 'assistant', content: aiResult.text }, { model: aiResult.model, input: 0, output: aiResult.tokens.output });
 
-        // Ответ пользователю
+        // 4. Отвечаем пользователю
         await ctx.reply(aiResult.text);
 
-        // Проверка на Лид и отправка алерта (HTML)
+        // 5. Проверяем на Лид и отправляем алерт менеджеру
         if (llm.isReadyForManager(userText, aiResult.text)) {
             await sendManagerAlert(ctx, config, userText, aiResult.text);
         }
 
-        // Дублирование в персональный топик (Self-Healing)
-        await sendToClientTopic(ctx, config, `👤 <b>Клиент:</b> ${userText}\n\n🤖 <b>Бот:</b> ${aiResult.text}`, { parse_mode: 'HTML' });
+        // 6. Дублируем переписку в персональный топик админ-группы
+        const mirrorText = `👤 <b>Клиент:</b> ${userText}\n\n🤖 <b>Бот:</b> ${aiResult.text}`;
+        await sendToClientTopic(ctx, config, mirrorText, { parse_mode: 'HTML' });
 
     } catch (error) {
         log(`❌ Critical Error: ${error.message}`);
