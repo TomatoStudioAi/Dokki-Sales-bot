@@ -1,6 +1,6 @@
 /**
  * API для управления конфигурацией ботов
- * Реализовано по принципу White Label: каждый клиент управляет только своим ботом.
+ * Реализовано по принципу White Label: бэкенд сам определяет username по токену.
  */
 
 import express from 'express';
@@ -34,25 +34,53 @@ const validateConfig = (data) => {
 
 /**
  * 1. POST /api/config
- * Регистрация нового бота или полное обновление настроек (UPSERT)
+ * Регистрация нового бота по Telegram Token (UPSERT)
  */
 router.post('/', async (req, res) => {
     const { 
-        telegram_username, 
+        telegram_token,     // Принимаем токен
         openai_key, 
         business_name, 
-        system_prompt, 
         welcome_message,
         alerts_topic_id 
     } = req.body;
 
-    if (!telegram_username || !openai_key || !business_name) {
+    // Базовая проверка
+    if (!telegram_token || !openai_key || !business_name) {
         return res.status(400).json({ 
             success: false,
-            error: 'Поля telegram_username, openai_key и business_name обязательны' 
+            error: 'Поля telegram_token, openai_key и business_name обязательны' 
         });
     }
 
+    // ВАЛИДАЦИЯ ТЕЛЕГРАМ ТОКЕНА
+    console.log(`[API] Валидация Telegram токена...`);
+    let telegram_username;
+    try {
+        const telegramResponse = await fetch(`https://api.telegram.org/bot${telegram_token}/getMe`);
+        const telegramData = await telegramResponse.json();
+        
+        if (!telegramData.ok) {
+            return res.status(400).json({ 
+                success: false,
+                error: 'Неверный Telegram токен. Проверьте правильность токена.',
+                field: 'telegram_token'
+            });
+        }
+        
+        telegram_username = '@' + telegramData.result.username.toLowerCase();
+        console.log(`[API] Токен валиден. Username: ${telegram_username}`);
+        
+    } catch (error) {
+        console.error('[API] Ошибка при валидации Telegram токена:', error);
+        return res.status(400).json({ 
+            success: false,
+            error: 'Не удалось проверить Telegram токен',
+            field: 'telegram_token'
+        });
+    }
+
+    // ВАЛИДАЦИЯ OPENAI КЛЮЧА
     if (!openai_key.startsWith('sk-')) {
         return res.status(400).json({ 
             success: false,
@@ -61,15 +89,6 @@ router.post('/', async (req, res) => {
         });
     }
 
-    const formattedUsername = normalizeUsername(telegram_username);
-    const validationErrors = validateConfig(req.body);
-    
-    if (validationErrors.length > 0) {
-        return res.status(400).json({ success: false, errors: validationErrors });
-    }
-
-    console.log(`[API] Валидация OpenAI ключа для ${formattedUsername}...`);
-    
     const isValidKey = await llm.validateOpenAIKey(openai_key);
     if (!isValidKey) {
         return res.status(400).json({ 
@@ -79,7 +98,12 @@ router.post('/', async (req, res) => {
         });
     }
 
-    console.log(`[API] Ключ валиден. Шифрование и сохранение...`);
+    const validationErrors = validateConfig(req.body);
+    if (validationErrors.length > 0) {
+        return res.status(400).json({ success: false, errors: validationErrors });
+    }
+
+    console.log(`[API] Сохранение конфигурации для ${telegram_username}...`);
     const encryptedKey = encrypt(openai_key);
 
     try {
@@ -88,17 +112,15 @@ router.post('/', async (req, res) => {
                 telegram_username, 
                 openai_key, 
                 business_name, 
-                system_prompt, 
                 welcome_message,
                 alerts_topic_id,
                 updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            VALUES ($1, $2, $3, $4, $5, NOW())
             ON CONFLICT (telegram_username) 
             DO UPDATE SET 
                 openai_key = EXCLUDED.openai_key,
                 business_name = EXCLUDED.business_name,
-                system_prompt = COALESCE(EXCLUDED.system_prompt, bots.system_prompt),
                 welcome_message = COALESCE(EXCLUDED.welcome_message, bots.welcome_message),
                 alerts_topic_id = COALESCE(EXCLUDED.alerts_topic_id, bots.alerts_topic_id),
                 updated_at = NOW()
@@ -106,18 +128,21 @@ router.post('/', async (req, res) => {
         `;
 
         const result = await db.query(sql, [
-            formattedUsername,
+            telegram_username,
             encryptedKey,
             business_name.trim(),
-            system_prompt?.trim() || null,
             welcome_message?.trim() || null,
             alerts_topic_id || null
         ]);
 
         console.log(`✅ [API POST] Бот успешно сохранен (ID: ${result[0].id})`);
-        res.json({ success: true, bot: result[0] });
+        res.json({ 
+            success: true, 
+            bot: result[0],
+            username: telegram_username 
+        });
     } catch (error) {
-        console.error(`❌ [API POST ERROR] для ${formattedUsername}:`, error.message);
+        console.error(`❌ [API POST ERROR] для ${telegram_username}:`, error.message);
         res.status(500).json({ success: false, error: 'Ошибка при сохранении конфигурации в базу' });
     }
 });
@@ -169,7 +194,6 @@ router.patch('/:username', async (req, res) => {
 
     let finalKeyToSave = null;
 
-    // Если прислали новый ключ - проверяем и шифруем
     if (openai_key) {
         if (!openai_key.startsWith('sk-')) {
             return res.status(400).json({ success: false, error: 'OpenAI ключ должен начинаться с sk-' });
