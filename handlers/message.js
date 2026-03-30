@@ -143,7 +143,9 @@ export async function handleMessage(ctx) {
 
         // 6. Дублируем переписку в персональный топик админ-группы
         const mirrorText = `👤 <b>Клиент:</b> ${userText}\n\n🤖 <b>Бот:</b> ${aiResult.text}`;
-        await sendToClientTopic(ctx, config, mirrorText, { parse_mode: 'HTML' });
+        // Отправка двух отдельных сообщений
+await sendToClientTopic(ctx, config, `👤 Клиент: ${userText}`);
+await sendToClientTopic(ctx, config, `🤖 Бот: ${aiResult.text}`);
 
     } catch (error) {
         log(`❌ Critical Error: ${error.message}`);
