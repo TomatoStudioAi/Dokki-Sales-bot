@@ -11,7 +11,7 @@ const log = (msg) => console.log(`[${new Date().toISOString()}] [SYSTEM] ${msg}`
 
 const port = process.env.PORT || 3000;
 
-// Railway домен (авто-определение)
+// Railway/Fly.io домен
 const webhookDomain = process.env.WEBHOOK_DOMAIN || 
                      process.env.RAILWAY_PUBLIC_DOMAIN || 
                      process.env.RAILWAY_STATIC_URL;
@@ -19,14 +19,9 @@ const webhookDomain = process.env.WEBHOOK_DOMAIN ||
 const app = express();
 
 // --- 1. MIDDLEWARE ---
-
-// Разрешаем запросы из Flutter-приложения (CORS)
 app.use(cors());
-
-// Парсинг JSON для API (нужен для /api/config и /api/prices)
 app.use(express.json());
 
-// Логирование всех входящих API-запросов (кроме вебхуков Телеграма)
 app.use((req, res, next) => {
     if (!req.path.includes('/telegram-webhook/')) {
         log(`${req.method} ${req.path}`);
@@ -39,7 +34,36 @@ app.use('/api/config', configRoutes);
 app.use('/api/prices', pricesRoutes);
 
 /**
- * Health check — проверка работоспособности системы
+ * НОВЫЙ ЭНДПОИНТ: Обновление системного промпта
+ * Вызывается из Flutter-приложения
+ */
+app.post('/api/update-prompt', async (req, res) => {
+    try {
+        const { telegram_username, system_prompt } = req.body;
+
+        if (!telegram_username) {
+            return res.status(400).json({ error: 'telegram_username обязательно' });
+        }
+
+        // Очищаем username от символа @ для поиска в БД
+        const cleanUsername = telegram_username.startsWith('@') 
+            ? telegram_username.substring(1) 
+            : telegram_username;
+
+        log(`[API] Обновление промпта для @${cleanUsername}`);
+
+        // Сохраняем в базу данных
+        await db.updateBotPrompt(cleanUsername, system_prompt);
+
+        res.json({ success: true, message: 'Промпт успешно обновлен' });
+    } catch (e) {
+        log(`❌ Ошибка API /update-prompt: ${e.message}`);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+/**
+ * Health check
  */
 app.get('/', async (req, res) => {
     try {
@@ -60,34 +84,27 @@ app.get('/', async (req, res) => {
 
 async function startApp() {
     try {
-        // 1. Проверка критических переменных ДО инициализации
         const token = process.env.TELEGRAM_BOT_TOKEN;
         if (!token) {
-            throw new Error('TELEGRAM_BOT_TOKEN не найден в переменных окружения!');
+            throw new Error('TELEGRAM_BOT_TOKEN не найден!');
         }
 
-        // 2. Инициализация структуры базы данных
         await db.init();
         log('✅ База данных инициализирована');
 
-        // 3. Инициализация бота
         const bot = new Telegraf(token);
 
-        // --- ЛОГИКА ТЕЛЕГРАМ-БОТА ---
-        /**
-         * Обработка команды /start
-         * Динамически подгружает настройки бренда из БД
-         */
+        // Обработка /start
         bot.start(async (ctx) => {
             try {
                 const rawUsername = ctx.botInfo?.username;
-                if (!rawUsername) return ctx.reply('Здравствуйте! Чем могу помочь?');
+                if (!rawUsername) return ctx.reply('Здравствуйте!');
 
                 const botData = await db.getBotConfig(rawUsername);
                 
                 if (!botData) {
-                    log(`⚠️ Бот @${rawUsername} не найден в БД при /start`);
-                    return ctx.reply('Здравствуйте! Бот находится в процессе настройки. Пожалуйста, сохраните настройки в приложении Dokki.');
+                    log(`⚠️ Бот @${rawUsername} не найден в БД`);
+                    return ctx.reply('Бот настраивается. Сохраните настройки в приложении.');
                 }
 
                 const businessName = botData.business_name || 'нашей компании';
@@ -97,51 +114,38 @@ async function startApp() {
                 return ctx.reply(welcomeText);
             } catch (e) {
                 log(`❌ Ошибка /start: ${e.message}`);
-                return ctx.reply('Здравствуйте! Я готов к работе. Задайте свой вопрос.');
+                return ctx.reply('Здравствуйте! Я готов к работе.');
             }
         });
 
-        // Основной обработчик (Текст, Голос, ИИ)
         bot.on(['text', 'voice'], handleMessage);
 
-        // 4. Настройка вебхуков
         if (webhookDomain) {
-            // РЕЖИМ PRODUCTION (WEBHOOK)
             const webhookPath = `/telegram-webhook/${token}`;
             const webhookUrl = `https://${webhookDomain}${webhookPath}`;
             
-            // Устанавливаем вебхук с очисткой старых обновлений
             await bot.telegram.setWebhook(webhookUrl, {
                 drop_pending_updates: true,
                 allowed_updates: ['message', 'callback_query']
             });
             
-            // Подключаем обработчик вебхука к Express
             app.use(bot.webhookCallback(webhookPath));
-            
             log(`✅ Webhook активен: ${webhookUrl}`);
         } else {
-            // РЕЖИМ DEVELOPMENT (POLLING)
             await bot.telegram.deleteWebhook();
             bot.launch();
-            log('🚀 Бот запущен в режиме POLLING (Local/Dev)');
+            log('🚀 Режим POLLING');
         }
         
-        // Запуск общего HTTP сервера
         app.listen(port, () => {
-            log(`✅ Сервер (API + Webhook) запущен на порту ${port}`);
+            log(`✅ Сервер запущен на порту ${port}`);
         });
 
-        // Корректное завершение работы
         process.once('SIGINT', () => bot.stop('SIGINT'));
         process.once('SIGTERM', () => bot.stop('SIGTERM'));
         
     } catch (error) {
-        // Детальное логирование согласно ТЗ #1
-        log(`❌ КРИТИЧЕСКАЯ ОШИБКА ЗАПУСКА: ${error.message}`);
-        console.error('📍 Stack trace:', error.stack);
-        console.error('🔍 Full error object:', error);
-        if (error.code) console.error('⚠️ Error code:', error.code);
+        log(`❌ КРИТИЧЕСКАЯ ОШИБКА: ${error.message}`);
         process.exit(1);
     }
 }
