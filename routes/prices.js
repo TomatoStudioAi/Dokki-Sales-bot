@@ -37,8 +37,79 @@ async function ensureBotExists(botId) {
 }
 
 /**
+ * НОВЫЙ ЭНДПОИНТ (Задача 20)
+ * POST /api/prices/upload
+ * Загрузка прайса по telegram_username (для Flutter)
+ */
+router.post('/upload', async (req, res) => {
+    const { telegram_username, products } = req.body;
+
+    if (!telegram_username) {
+        return res.status(400).json({ error: 'telegram_username обязательно' });
+    }
+
+    if (!Array.isArray(products)) {
+        return res.status(400).json({ error: 'Ожидается массив products' });
+    }
+
+    // Нормализация юзернейма
+    const cleanUsername = telegram_username.startsWith('@') 
+        ? telegram_username.toLowerCase() 
+        : `@${telegram_username.toLowerCase()}`;
+
+    try {
+        // 1. Ищем bot_id по username
+        const botRes = await db.query('SELECT id FROM bots WHERE telegram_username = $1', [cleanUsername]);
+        if (!botRes[0]) {
+            return res.status(404).json({ error: `Бот ${cleanUsername} не зарегистрирован в системе` });
+        }
+
+        const bot_id = botRes[0].id;
+
+        // 2. Валидация всех пришедших товаров
+        products.forEach(validateAndPrepareProduct);
+
+        // 3. Атомарная замена прайса через транзакцию
+        const client = await db.pool.connect();
+        try {
+            await client.query('BEGIN');
+            
+            // Удаляем старый прайс этого бота
+            await client.query('DELETE FROM products WHERE bot_id = $1', [bot_id]);
+            
+            // Вставляем новые позиции
+            for (const p of products) {
+                await client.query(
+                    `INSERT INTO products (bot_id, sku, name, category, price, description) 
+                     VALUES ($1, $2, $3, $4, $5, $6)`,
+                    [
+                        bot_id, 
+                        p.sku, 
+                        p.name, 
+                        p.category || 'Общее', 
+                        p.price || 0, 
+                        p.description || ''
+                    ]
+                );
+            }
+            
+            await client.query('COMMIT');
+            console.log(`[API] Прайс обновлен для @${cleanUsername} (${products.length} поз.)`);
+            res.json({ success: true, count: products.length });
+        } catch (e) {
+            await client.query('ROLLBACK');
+            throw e;
+        } finally {
+            client.release();
+        }
+    } catch (err) {
+        console.error(`[API_ERROR] /prices/upload: ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
  * 1. GET /api/prices/:bot_id
- * Получить весь прайс конкретного бота по его ID
  */
 router.get('/:bot_id', async (req, res) => {
     const { bot_id } = req.params;
@@ -58,7 +129,6 @@ router.get('/:bot_id', async (req, res) => {
 
 /**
  * 2. GET /api/prices/by-username/:username
- * Удобный поиск прайса для Flutter, если известен только юзернейм бота
  */
 router.get('/by-username/:username', async (req, res) => {
     const { username } = req.params;
@@ -81,7 +151,6 @@ router.get('/by-username/:username', async (req, res) => {
 
 /**
  * 3. DELETE /api/prices/:bot_id
- * Полная очистка прайса
  */
 router.delete('/:bot_id', async (req, res) => {
     const { bot_id } = req.params;
@@ -96,7 +165,6 @@ router.delete('/:bot_id', async (req, res) => {
 
 /**
  * 4. PUT /api/prices/:bot_id
- * ПОЛНАЯ ЗАМЕНА прайса (Атомарно)
  */
 router.put('/:bot_id', async (req, res) => {
     const { bot_id } = req.params;
@@ -111,9 +179,7 @@ router.put('/:bot_id', async (req, res) => {
         const client = await db.pool.connect();
         try {
             await client.query('BEGIN');
-            // Удаляем старое
             await client.query('DELETE FROM products WHERE bot_id = $1', [bot_id]);
-            // Вставляем новое
             for (const p of products) {
                 await client.query(
                     `INSERT INTO products (bot_id, sku, name, category, price, description) 
@@ -136,7 +202,6 @@ router.put('/:bot_id', async (req, res) => {
 
 /**
  * 5. POST /api/prices/:bot_id
- * UPSERT (Обновление существующих SKU или добавление новых)
  */
 router.post('/:bot_id', async (req, res) => {
     const { bot_id } = req.params;
