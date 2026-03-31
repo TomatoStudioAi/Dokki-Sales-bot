@@ -11,7 +11,7 @@ function validateAndPrepareProduct(p) {
         throw new Error(`Имя товара обязательно`);
     }
 
-    // Авто-генерация SKU, если он не передан
+    // Авто-генерация SKU, если он не передан (Вариант Б)
     if (!p.sku) {
         p.sku = p.name
             .toLowerCase()
@@ -36,144 +36,139 @@ async function ensureBotExists(botId) {
     return true;
 }
 
+// --- НОВЫЕ ЭНДПОИНТЫ ДЛЯ ТОЧЕЧНОГО УПРАВЛЕНИЯ (ЗАДАЧА 32) ---
+
 /**
- * НОВЫЙ ЭНДПОИНТ (Задача 20)
- * POST /api/prices/upload
- * Загрузка прайса по telegram_username (для Flutter)
+ * POST /api/prices/update-single
+ * Создание или обновление одного товара
  */
-router.post('/upload', async (req, res) => {
-    const { telegram_username, products } = req.body;
+router.post('/update-single', async (req, res) => {
+    const { telegram_username, product } = req.body;
 
-    if (!telegram_username) {
-        return res.status(400).json({ error: 'telegram_username обязательно' });
+    if (!telegram_username || !product || !product.name) {
+        return res.status(400).json({ error: 'Требуются telegram_username и product.name' });
     }
 
-    if (!Array.isArray(products)) {
-        return res.status(400).json({ error: 'Ожидается массив products' });
-    }
-
-    // Нормализация юзернейма
     const cleanUsername = telegram_username.startsWith('@') 
         ? telegram_username.toLowerCase() 
         : `@${telegram_username.toLowerCase()}`;
 
     try {
-        // 1. Ищем bot_id по username
+        // 1. Ищем бота
         const botRes = await db.query('SELECT id FROM bots WHERE telegram_username = $1', [cleanUsername]);
         if (!botRes[0]) {
-            return res.status(404).json({ error: `Бот ${cleanUsername} не зарегистрирован в системе` });
+            return res.status(404).json({ error: 'Бот не зарегистрирован' });
         }
 
         const bot_id = botRes[0].id;
 
-        // 2. Валидация всех пришедших товаров
-        products.forEach(validateAndPrepareProduct);
+        // 2. Валидация и подготовка SKU (через существующую функцию)
+        validateAndPrepareProduct(product);
 
-        // 3. Атомарная замена прайса через транзакцию
-        const client = await db.pool.connect();
-        try {
-            await client.query('BEGIN');
-            
-            // Удаляем старый прайс этого бота
-            await client.query('DELETE FROM products WHERE bot_id = $1', [bot_id]);
-            
-            // Вставляем новые позиции
-            for (const p of products) {
-                await client.query(
-                    `INSERT INTO products (bot_id, sku, name, category, price, description) 
-                     VALUES ($1, $2, $3, $4, $5, $6)`,
-                    [
-                        bot_id, 
-                        p.sku, 
-                        p.name, 
-                        p.category || 'Общее', 
-                        p.price || 0, 
-                        p.description || ''
-                    ]
-                );
-            }
-            
-            await client.query('COMMIT');
-            console.log(`[API] Прайс обновлен для @${cleanUsername} (${products.length} поз.)`);
-            res.json({ success: true, count: products.length });
-        } catch (e) {
-            await client.query('ROLLBACK');
-            throw e;
-        } finally {
-            client.release();
+        // 3. Логика сохранения: UPDATE если есть ID, иначе INSERT
+        if (product.id) {
+            await db.query(`
+                UPDATE products 
+                SET name = $1, category = $2, price = $3, description = $4, sku = $5
+                WHERE bot_id = $6 AND id = $7
+            `, [
+                product.name, 
+                product.category || 'Общее', 
+                product.price || 0, 
+                product.description || '', 
+                product.sku,
+                bot_id, 
+                product.id
+            ]);
+            console.log(`[API] Товар ID ${product.id} обновлен для ${cleanUsername}`);
+        } else {
+            await db.query(`
+                INSERT INTO products (bot_id, sku, name, category, price, description)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (bot_id, sku) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    category = EXCLUDED.category,
+                    price = EXCLUDED.price,
+                    description = EXCLUDED.description
+            `, [
+                bot_id, 
+                product.sku, 
+                product.name, 
+                product.category || 'Общее', 
+                product.price || 0, 
+                product.description || ''
+            ]);
+            console.log(`[API] Новый товар "${product.name}" добавлен для ${cleanUsername}`);
         }
+
+        res.json({ success: true });
     } catch (err) {
-        console.error(`[API_ERROR] /prices/upload: ${err.message}`);
+        console.error(`[API_ERROR] update-single: ${err.message}`);
         res.status(500).json({ error: err.message });
     }
 });
 
 /**
- * 1. GET /api/prices/:bot_id
+ * DELETE /api/prices/delete-single
+ * Удаление одного товара
  */
-router.get('/:bot_id', async (req, res) => {
-    const { bot_id } = req.params;
+router.delete('/delete-single', async (req, res) => {
+    const { telegram_username, product_id } = req.body;
+
+    if (!telegram_username || !product_id) {
+        return res.status(400).json({ error: 'Требуются telegram_username и product_id' });
+    }
+
+    const cleanUsername = telegram_username.startsWith('@') 
+        ? telegram_username.toLowerCase() 
+        : `@${telegram_username.toLowerCase()}`;
+
     try {
-        const products = await db.query(
-            `SELECT id, sku, name, category, price, description 
-             FROM products 
-             WHERE bot_id = $1 
-             ORDER BY category ASC, name ASC`,
-            [bot_id]
+        const botRes = await db.query('SELECT id FROM bots WHERE telegram_username = $1', [cleanUsername]);
+        if (!botRes[0]) {
+            return res.status(404).json({ error: 'Бот не найден' });
+        }
+
+        const bot_id = botRes[0].id;
+
+        // Удаляем только если товар принадлежит именно этому боту
+        const deleteRes = await db.query(
+            'DELETE FROM products WHERE bot_id = $1 AND id = $2 RETURNING id', 
+            [bot_id, product_id]
         );
-        res.json({ success: true, count: products.length, products });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+
+        if (deleteRes.length === 0) {
+            return res.status(404).json({ error: 'Товар не найден или не принадлежит этому боту' });
+        }
+
+        console.log(`[API] Товар ID ${product_id} удален для ${cleanUsername}`);
+        res.json({ success: true });
+    } catch (err) {
+        console.error(`[API_ERROR] delete-single: ${err.message}`);
+        res.status(500).json({ error: err.message });
     }
 });
 
-/**
- * 2. GET /api/prices/by-username/:username
- */
-router.get('/by-username/:username', async (req, res) => {
-    const { username } = req.params;
-    const formattedUsername = username.startsWith('@') ? username : `@${username}`;
+// --- СУЩЕСТВУЮЩИЕ ЭНДПОИНТЫ ---
 
-    try {
-        const bot = await db.query('SELECT id FROM bots WHERE telegram_username = $1', [formattedUsername]);
-        if (!bot[0]) return res.status(404).json({ error: 'Бот не найден' });
-        
-        const products = await db.query(
-            'SELECT sku, name, category, price, description FROM products WHERE bot_id = $1 ORDER BY category, name',
-            [bot[0].id]
-        );
-        
-        res.json({ success: true, bot_id: bot[0].id, products });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+/**
+ * POST /api/prices/upload
+ * Массовая загрузка прайса
+ */
+router.post('/upload', async (req, res) => {
+    const { telegram_username, products } = req.body;
+    if (!telegram_username || !Array.isArray(products)) {
+        return res.status(400).json({ error: 'Некорректные данные' });
     }
-});
-
-/**
- * 3. DELETE /api/prices/:bot_id
- */
-router.delete('/:bot_id', async (req, res) => {
-    const { bot_id } = req.params;
-    try {
-        await ensureBotExists(bot_id);
-        const result = await db.query('DELETE FROM products WHERE bot_id = $1 RETURNING id', [bot_id]);
-        res.json({ success: true, deleted_count: result.length });
-    } catch (error) {
-        res.status(400).json({ error: error.message });
-    }
-});
-
-/**
- * 4. PUT /api/prices/:bot_id
- */
-router.put('/:bot_id', async (req, res) => {
-    const { bot_id } = req.params;
-    const { products } = req.body;
-
-    if (!Array.isArray(products)) return res.status(400).json({ error: 'Ожидается массив products' });
+    const cleanUsername = telegram_username.startsWith('@') 
+        ? telegram_username.toLowerCase() 
+        : `@${telegram_username.toLowerCase()}`;
 
     try {
-        await ensureBotExists(bot_id);
+        const botRes = await db.query('SELECT id FROM bots WHERE telegram_username = $1', [cleanUsername]);
+        if (!botRes[0]) return res.status(404).json({ error: 'Бот не найден' });
+        const bot_id = botRes[0].id;
+
         products.forEach(validateAndPrepareProduct);
 
         const client = await db.pool.connect();
@@ -188,7 +183,7 @@ router.put('/:bot_id', async (req, res) => {
                 );
             }
             await client.query('COMMIT');
-            res.json({ success: true, message: 'Прайс-лист полностью обновлен', count: products.length });
+            res.json({ success: true, count: products.length });
         } catch (e) {
             await client.query('ROLLBACK');
             throw e;
@@ -196,48 +191,39 @@ router.put('/:bot_id', async (req, res) => {
             client.release();
         }
     } catch (err) {
-        res.status(400).json({ error: err.message });
+        res.status(500).json({ error: err.message });
     }
 });
 
 /**
- * 5. POST /api/prices/:bot_id
+ * Получение прайса по username
  */
-router.post('/:bot_id', async (req, res) => {
-    const { bot_id } = req.params;
-    const { products } = req.body;
-
-    if (!Array.isArray(products)) return res.status(400).json({ error: 'Ожидается массив' });
-
+router.get('/by-username/:username', async (req, res) => {
+    const { username } = req.params;
+    const formattedUsername = username.startsWith('@') ? username : `@${username}`;
     try {
-        await ensureBotExists(bot_id);
-        products.forEach(validateAndPrepareProduct);
+        const bot = await db.query('SELECT id FROM bots WHERE telegram_username = $1', [formattedUsername]);
+        if (!bot[0]) return res.status(404).json({ error: 'Бот не найден' });
+        const products = await db.query(
+            'SELECT id, sku, name, category, price, description FROM products WHERE bot_id = $1 ORDER BY category, name',
+            [bot[0].id]
+        );
+        res.json({ success: true, bot_id: bot[0].id, products });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
-        const client = await db.pool.connect();
-        try {
-            await client.query('BEGIN');
-            for (const p of products) {
-                await client.query(`
-                    INSERT INTO products (bot_id, sku, name, category, price, description)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (bot_id, sku) DO UPDATE SET
-                        name = EXCLUDED.name,
-                        category = EXCLUDED.category,
-                        price = EXCLUDED.price,
-                        description = EXCLUDED.description,
-                        created_at = NOW()
-                `, [bot_id, p.sku, p.name, p.category || 'Общее', p.price || 0, p.description || '']);
-            }
-            await client.query('COMMIT');
-            res.json({ success: true, message: 'Товары синхронизированы по SKU' });
-        } catch (e) {
-            await client.query('ROLLBACK');
-            throw e;
-        } finally {
-            client.release();
-        }
-    } catch (err) {
-        res.status(400).json({ error: err.message });
+// Дополнительные маршруты по ID
+router.get('/:bot_id', async (req, res) => {
+    try {
+        const products = await db.query(
+            'SELECT id, sku, name, category, price, description FROM products WHERE bot_id = $1 ORDER BY category, name',
+            [req.params.bot_id]
+        );
+        res.json({ success: true, count: products.length, products });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
 
